@@ -105,3 +105,35 @@ export interface QueueRow {
   reason: string | null;
   enqueued_at: number;
 }
+
+/** One focus move: `Arbiter#lastSwitch`, replayed by the renderer as a toast. */
+export interface SwitchInfo {
+  from: string | null;
+  to: string;
+  reason: string;
+  at: number;
+}
+
+/** A session as the renderer sees it: `Arbiter#snapshot()`'s per-session shape. */
+export interface SessionSnapshot {
+  uuid: string;
+  label: string;
+  cwd: string;
+  paneId: string;
+  state: SessionState;
+  cls: AttentionClass;
+  clsLabel: string;
+  reason: string;
+  lastEvent: string | null;
+  since: number;
+  updatedAt: number;
+  rank: number;
+}
+
+/** `Arbiter#snapshot()`: the whole fleet, pushed to the renderer over `fleet:state`. */
+export interface FleetSnapshot {
+  focused: string | null;
+  pinned: boolean;
+  lastSwitch: SwitchInfo | null;
+  sessions: SessionSnapshot[];
+}
