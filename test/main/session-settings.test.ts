@@ -1,34 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { writeSessionSettings } from '../../src/main/session-settings.ts';
+import { writeSessionSettings, type ClaudeSessionSettings } from '../../src/main/session-settings.ts';
+import { withTempDir } from '../helpers/tmp.ts';
 
-interface ParsedEntry {
-  readonly matcher?: string;
-  readonly hooks: readonly { readonly url: string }[];
-}
-
-interface ParsedSettings {
-  readonly permissions: { readonly defaultMode: string };
-  readonly hooks: Record<string, readonly ParsedEntry[]>;
-}
+// The shape under test is the production one, so a change to the settings
+// file's structure breaks this test instead of silently drifting past it.
+type ParsedSettings = ClaudeSessionSettings;
 
 function first<T>(arr: readonly T[] | undefined): T {
   const item = arr?.[0];
   assert.ok(item, 'expected a first element');
   return item;
-}
-
-function withTempDir(fn: (dir: string) => void): void {
-  const dir = mkdtempSync(path.join(tmpdir(), 'session-settings-'));
-  try {
-    fn(dir);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
 }
 
 void test('the settings file merges hooks and forces real permission prompts', () => {

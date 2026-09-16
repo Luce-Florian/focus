@@ -1,20 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { open } from '../../src/main/db.ts';
+import { withTempDir } from '../helpers/tmp.ts';
 
 function withStore(fn: (store: ReturnType<typeof open>) => void): void {
-  const dir = mkdtempSync(path.join(tmpdir(), 'fleet-db-'));
-  const store = open(path.join(dir, 'fleet.db'));
-  try {
-    fn(store);
-  } finally {
-    store.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
+  withTempDir((dir) => {
+    const store = open(path.join(dir, 'fleet.db'));
+    try {
+      fn(store);
+    } finally {
+      store.close();
+    }
+  }, 'fleet-db-');
 }
 
 void test('a registered session can be read back by uuid', () => {
@@ -61,9 +60,8 @@ void test('hook events append to the log and come back most-recent first', () =>
 });
 
 void test('every launch starts from a clean fleet: sessions and the queue do not survive a restart', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'fleet-db-'));
-  const dbPath = path.join(dir, 'fleet.db');
-  try {
+  withTempDir((dir) => {
+    const dbPath = path.join(dir, 'fleet.db');
     const first = open(dbPath);
     first.insertSession({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1', state: 'booting', createdAt: 1000 });
     first.upsertQueue('a', 3, 'permission', 1000);
@@ -76,7 +74,5 @@ void test('every launch starts from a clean fleet: sessions and the queue do not
     } finally {
       restarted.close();
     }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  }, 'fleet-db-');
 });

@@ -1,20 +1,20 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import type { HookEventName } from '../shared/protocol.ts';
+import { hookUrl, type HookEventName } from '../shared/protocol.ts';
 
-interface HttpHook {
+export interface HttpHook {
   readonly type: 'http';
   readonly url: string;
   readonly timeout: number;
 }
 
-interface HookEntry {
+export interface HookEntry {
   readonly matcher?: string;
   readonly hooks: readonly HttpHook[];
 }
 
-interface ClaudeSessionSettings {
+export interface ClaudeSessionSettings {
   readonly hooks: Partial<Record<HookEventName, readonly HookEntry[]>>;
   readonly permissions: {
     readonly defaultMode: 'default';
@@ -36,8 +36,11 @@ export interface WriteSessionSettingsOptions {
  * Code usage outside the fleet.
  */
 export function writeSessionSettings({ runDir, uuid, host, port, token, events }: WriteSessionSettingsOptions): string {
-  const url = (event: HookEventName) => `http://${host}:${port}/h/${token}/${uuid}/${event}`;
-  const httpHook = (event: HookEventName): HttpHook => ({ type: 'http', url: url(event), timeout: 2 });
+  const httpHook = (event: HookEventName): HttpHook => ({
+    type: 'http',
+    url: hookUrl(host, port, token, uuid, event),
+    timeout: 2
+  });
 
   const hooks: Partial<Record<HookEventName, readonly HookEntry[]>> = {};
   for (const event of events) {

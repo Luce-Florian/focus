@@ -1,34 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { computeRoot, assertProjectRoot, SESSIONS, HOOK_EVENTS } from '../../src/main/config.ts';
+import { withTempDir } from '../helpers/tmp.ts';
 
-void test('computeRoot resolves the repository root one level above the compiled bundle', () => {
-  // dist/main.js sits one level below the repository root, unlike
-  // src/main/config.js which sat two levels below it.
-  assert.equal(computeRoot('/repo/dist'), '/repo');
+void test('computeRoot resolves the same repository root from every bundle depth', () => {
+  // esbuild emits dist/main.js one level below the root and one bundle per
+  // test file under dist/test/**, each with its own import.meta.dirname.
+  // Counting `..` was only ever right for the first of them.
+  withTempDir((root) => {
+    writeFileSync(path.join(root, 'package.json'), '{}');
+    const deep = path.join(root, 'dist', 'test', 'main');
+    mkdirSync(deep, { recursive: true });
+
+    assert.equal(computeRoot(path.join(root, 'dist')), root);
+    assert.equal(computeRoot(path.join(root, 'dist', 'test')), root);
+    assert.equal(computeRoot(deep), root);
+  });
+});
+
+void test('computeRoot fails loudly rather than returning a nonsense root', () => {
+  assert.throws(() => computeRoot(path.parse(process.cwd()).root), /no package\.json/);
 });
 
 void test('assertProjectRoot accepts a directory that actually looks like the repository root', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'config-root-'));
-  writeFileSync(path.join(dir, 'package.json'), '{}');
-  try {
+  withTempDir((dir) => {
+    writeFileSync(path.join(dir, 'package.json'), '{}');
     assert.doesNotThrow(() => { assertProjectRoot(dir); });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  }, 'config-root-');
 });
 
 void test('assertProjectRoot fails fast when the resolved root is wrong', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'config-root-'));
-  try {
+  withTempDir((dir) => {
     assert.throws(() => { assertProjectRoot(dir); }, /package\.json/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  }, 'config-root-');
 });
 
 void test('the walking skeleton still drives exactly two sessions', () => {

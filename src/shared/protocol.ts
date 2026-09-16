@@ -77,6 +77,31 @@ export interface HookEventMessage {
   payload: HookPayload;
 }
 
+/**
+ * The hook endpoint's path layout, `/h/<token>/<uuid>/<Event>`. Joining a
+ * Claude session to its pane is URL routing, so the builder and the parser
+ * have to agree byte for byte — they live together here rather than being
+ * restated in `session-settings.ts`, `hooks-server.ts` and the smoke test.
+ */
+export const HOOK_PATH_PREFIX = 'h';
+
+export function hookPath(token: string, uuid: string, event: string): string {
+  return `/${HOOK_PATH_PREFIX}/${token}/${uuid}/${event}`;
+}
+
+export function hookUrl(host: string, port: number, token: string, uuid: string, event: string): string {
+  return `http://${host}:${port}${hookPath(token, uuid, event)}`;
+}
+
+/** The identity a request URL carries, or null when it is not a hook path. */
+export function parseHookPath(url: string): { token: string; uuid: string; event: string } | null {
+  const parts = url.split('/').filter(Boolean);
+  if (parts.length !== 4) return null;
+  const [prefix, token, uuid, event] = parts;
+  if (prefix !== HOOK_PATH_PREFIX || !token || !uuid || !event) return null;
+  return { token, uuid, event };
+}
+
 /** `sessions` table row (`src/main/db.ts`). */
 export interface SessionRow {
   uuid: string;
@@ -141,7 +166,9 @@ export interface FleetSnapshot {
 /** The `contextBridge` API the sandboxed preload exposes as `window.fleet`. */
 export interface FleetBridge {
   onState(cb: (state: FleetSnapshot) => void): void;
-  onOutput(cb: (paneId: string, bytes: ArrayBuffer) => void): void;
+  // `tmux.ts` emits a Buffer and Electron's structured clone hands the
+  // renderer a Uint8Array — never a bare ArrayBuffer.
+  onOutput(cb: (paneId: string, bytes: Uint8Array) => void): void;
   ready(): Promise<FleetSnapshot>;
   input(paneId: string, data: string): void;
   focus(uuid: string): void;

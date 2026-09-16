@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 
-import type { HookEventMessage, HookPayload } from '../shared/protocol.ts';
+import { parseHookPath, type HookEventMessage, type HookPayload } from '../shared/protocol.ts';
 
 const MAX_BODY = 1 << 20;
 
@@ -37,18 +37,14 @@ export function startHooksServer({ host, onEvent }: StartHooksServerOptions): Pr
       return;
     }
 
-    const parts = (req.url ?? '').split('/').filter(Boolean);
-    if (parts.length !== 4 || parts[0] !== 'h') {
+    const identity = parseHookPath(req.url ?? '');
+    if (!identity) {
       reply(404, { error: 'not found' });
       return;
     }
-    const [, urlToken, uuid, event] = parts;
-    if (urlToken !== token) {
+    const { uuid, event } = identity;
+    if (identity.token !== token) {
       reply(403, { error: 'bad token' });
-      return;
-    }
-    if (!uuid || !event) {
-      reply(404, { error: 'not found' });
       return;
     }
 

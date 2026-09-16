@@ -4,7 +4,7 @@ import type { FleetBridge, FleetSnapshot } from './shared/protocol.ts';
 
 const fleet = {
   onState: (cb) => ipcRenderer.on('fleet:state', (_e, state: FleetSnapshot) => { cb(state); }),
-  onOutput: (cb) => ipcRenderer.on('pane:output', (_e, paneId: string, bytes: ArrayBuffer) => { cb(paneId, bytes); }),
+  onOutput: (cb) => ipcRenderer.on('pane:output', (_e, paneId: string, bytes: Uint8Array) => { cb(paneId, bytes); }),
   ready: () => ipcRenderer.invoke('fleet:ready'),
   input: (paneId, data) => { ipcRenderer.send('pane:input', paneId, data); },
   focus: (uuid) => { ipcRenderer.send('fleet:focus', uuid); },

@@ -9,13 +9,25 @@ export interface SessionSpec {
 }
 
 /**
- * `dist/main.js` sits one level below the repository root — unlike
- * `src/main/config.js` before it, which sat two levels below (`src/main/`).
- * The bundle's own directory is the root's only child on this path, so ROOT
- * is one `..` away, not two.
+ * The repository root is the nearest ancestor holding a `package.json`,
+ * starting from the directory the running bundle sits in.
+ *
+ * Counting `..` would only be correct for one output depth. esbuild emits
+ * `dist/main.js` one level below the root but also one bundle per test file
+ * under `dist/test/**`, each carrying its own inlined copy of this module and
+ * its own `import.meta.dirname` — so a fixed `..` silently resolved ROOT to
+ * `dist/test` there, and every path derived from it (RUN_DIR, DB_PATH, both
+ * `workspaces/` entries) pointed at directories that do not exist. Walking up
+ * is correct at every depth.
  */
-export function computeRoot(mainDirname: string): string {
-  return path.resolve(mainDirname, '..');
+export function computeRoot(startDir: string): string {
+  let dir = path.resolve(startDir);
+  for (;;) {
+    if (existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) throw new Error(`no package.json in any directory above ${startDir}`);
+    dir = parent;
+  }
 }
 
 /**

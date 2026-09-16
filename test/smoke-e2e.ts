@@ -18,7 +18,8 @@ import { open } from '../src/main/db.ts';
 import { startHooksServer } from '../src/main/hooks-server.ts';
 import { writeSessionSettings } from '../src/main/session-settings.ts';
 import { TmuxBridge } from '../src/main/tmux.ts';
-import type { HookEventName } from '../src/shared/protocol.ts';
+import { hookUrl, type HookEventName } from '../src/shared/protocol.ts';
+import { shQuote } from '../src/shared/sh.ts';
 
 const HOST = '127.0.0.1';
 const SOCKET = 'fleet-smoke';
@@ -26,7 +27,6 @@ const SESSION = 'smoke';
 const HOOK_EVENTS: readonly HookEventName[] = ['SessionStart', 'PreToolUse', 'Notification', 'Stop'];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 function post(url: string, json: unknown): string {
   return `curl -sS -X POST -H 'content-type: application/json' -d ${shQuote(JSON.stringify(json))} ${shQuote(url)} >/dev/null`;
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
     if (s) arbiter.markGone(s.uuid);
   });
 
-  const url = (uuid: string, event: string) => `http://${HOST}:${hooks.port}/h/${hooks.token}/${uuid}/${event}`;
+  const url = (uuid: string, event: string) => hookUrl(HOST, hooks.port, hooks.token, uuid, event);
 
   const specs: readonly SessionSpec[] = [
     {

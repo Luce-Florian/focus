@@ -10,6 +10,7 @@ import { open, type Store } from './db.ts';
 import { startHooksServer, type HooksServer } from './hooks-server.ts';
 import { writeSessionSettings } from './session-settings.ts';
 import { TmuxBridge } from './tmux.ts';
+import { shQuote } from '../shared/sh.ts';
 import type { FleetSnapshot } from '../shared/protocol.ts';
 
 // A wrong ROOT would otherwise fail silently, one directory join at a time.
@@ -20,10 +21,6 @@ let store: Store | null = null;
 let bridge: TmuxBridge | null = null;
 let arbiter: Arbiter | null = null;
 let hooks: HooksServer | null = null;
-
-function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
 
 function resolveClaude(): string {
   try {
