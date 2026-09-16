@@ -1,23 +1,37 @@
-'use strict';
+import { Terminal } from '@xterm/xterm';
+import '@xterm/xterm/css/xterm.css';
 
-const stage = document.getElementById('stage');
-const rail = document.getElementById('rail');
-const titleEl = document.getElementById('title');
-const reasonEl = document.getElementById('reason');
-const dotEl = document.getElementById('dot');
-const emptyEl = document.getElementById('empty');
-const toastEl = document.getElementById('toast');
-const pinBtn = document.getElementById('pin');
-const leaveBtn = document.getElementById('leave');
+import type { SessionSnapshot, FleetSnapshot } from '../shared/protocol.ts';
 
-const terms = new Map(); // paneId -> { term, el }
-let state = { sessions: [], focused: null, pinned: false, lastSwitch: null };
+function required(id: string): HTMLElement {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`#${id} is missing from index.html`);
+  return el;
+}
+
+const stage = required('stage');
+const rail = required('rail');
+const titleEl = required('title');
+const reasonEl = required('reason');
+const dotEl = required('dot');
+const emptyEl = required('empty');
+const toastEl = required('toast');
+const pinBtn = required('pin');
+const leaveBtn = required('leave');
+
+interface TermEntry {
+  readonly term: Terminal;
+  readonly el: HTMLDivElement;
+}
+
+const terms = new Map<string, TermEntry>(); // paneId -> { term, el }
+let state: FleetSnapshot = { sessions: [], focused: null, pinned: false, lastSwitch: null };
 let geometry = { cols: 100, rows: 30 };
-let shownPane = null;
+let shownPane: string | null = null;
 let lastSwitchAt = 0;
-let toastTimer = null;
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
-function makeTerm(paneId) {
+function makeTerm(paneId: string): TermEntry {
   const el = document.createElement('div');
   el.className = 'term';
   el.hidden = true;
@@ -32,9 +46,9 @@ function makeTerm(paneId) {
   });
   term.open(el);
   term.resize(geometry.cols, geometry.rows);
-  term.onData((data) => window.fleet.input(paneId, data));
+  term.onData((data) => { window.fleet.input(paneId, data); });
 
-  const entry = { term, el };
+  const entry: TermEntry = { term, el };
   terms.set(paneId, entry);
   return entry;
 }
@@ -42,27 +56,30 @@ function makeTerm(paneId) {
 window.fleet.onOutput((paneId, bytes) => {
   // Every pane is rendered continuously, focused or not: switching is a
   // visibility toggle, never a replay.
-  const entry = terms.get(paneId) || makeTerm(paneId);
+  const entry = terms.get(paneId) ?? makeTerm(paneId);
   entry.term.write(new Uint8Array(bytes));
 });
 
-const sessionOf = (uuid) => state.sessions.find((s) => s.uuid === uuid) || null;
+const sessionOf = (uuid: string | null): SessionSnapshot | null =>
+  state.sessions.find((s) => s.uuid === uuid) ?? null;
 
-function elapsed(ts) {
+function elapsed(ts: number): string {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h`;
 }
 
-function toast(text) {
+function toast(text: string): void {
   toastEl.textContent = text;
   toastEl.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toastEl.hidden = true; }, 2600);
+  toastTimer = setTimeout(() => {
+    toastEl.hidden = true;
+  }, 2600);
 }
 
-function render() {
+function render(): void {
   const focused = sessionOf(state.focused);
   const pane = focused ? focused.paneId : null;
 
@@ -88,20 +105,22 @@ function render() {
   pinBtn.textContent = state.pinned ? 'épinglé' : 'épingler';
 
   const others = state.sessions.filter((s) => s.uuid !== state.focused);
-  rail.replaceChildren(...others.map((s) => {
-    const chip = document.createElement('div');
-    chip.className = 'chip' + (s.rank >= 0 ? ' claiming' : '');
-    chip.innerHTML =
-      `<span class="dot ${s.state}"></span>` +
-      `<span><span class="name">${s.label}</span>` +
-      `<div class="sub">${s.clsLabel} · ${elapsed(s.since)}</div></span>` +
-      (s.rank >= 0 ? `<span class="rank">#${s.rank + 1}</span>` : '');
-    chip.onclick = () => window.fleet.focus(s.uuid);
-    return chip;
-  }));
+  rail.replaceChildren(
+    ...others.map((s) => {
+      const chip = document.createElement('div');
+      chip.className = 'chip' + (s.rank >= 0 ? ' claiming' : '');
+      chip.innerHTML =
+        `<span class="dot ${s.state}"></span>` +
+        `<span><span class="name">${s.label}</span>` +
+        `<div class="sub">${s.clsLabel} · ${elapsed(s.since)}</div></span>` +
+        (s.rank >= 0 ? `<span class="rank">#${s.rank + 1}</span>` : '');
+      chip.onclick = () => { window.fleet.focus(s.uuid); };
+      return chip;
+    })
+  );
 }
 
-function applyGeometry() {
+function applyGeometry(): void {
   const probe = document.createElement('div');
   probe.style.cssText = 'position:absolute;visibility:hidden;font:13px Menlo,monospace;white-space:pre';
   probe.textContent = 'W'.repeat(100);
@@ -132,12 +151,12 @@ window.fleet.onState((s) => {
   render();
 });
 
-pinBtn.onclick = () => window.fleet.pin(!state.pinned);
-leaveBtn.onclick = () => window.fleet.leave();
+pinBtn.onclick = () => { window.fleet.pin(!state.pinned); };
+leaveBtn.onclick = () => { window.fleet.leave(); };
 window.addEventListener('resize', applyGeometry);
 setInterval(render, 1000); // keeps the rail's elapsed times honest
 
-window.fleet.ready().then((s) => {
+void window.fleet.ready().then((s) => {
   state = s;
   applyGeometry();
   render();

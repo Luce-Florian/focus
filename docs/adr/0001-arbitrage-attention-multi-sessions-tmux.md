@@ -2,7 +2,7 @@
 
 - **Statut** : accepté
 - **Date** : 2026-09-16
-- **Portée** : `src/main/tmux.js`, `src/main/session-settings.js`, `src/main/hooks-server.js`, `src/main/arbiter.js`
+- **Portée** : `src/main/tmux.ts`, `src/main/session-settings.ts`, `src/main/hooks-server.ts`, `src/main/arbiter.ts`
 
 ## Contexte
 
@@ -34,9 +34,9 @@ Il faut donc trois briques distinctes :
 ```mermaid
 flowchart LR
     subgraph Electron["Electron — processus principal"]
-        BR["tmux.js<br/>control mode"]
-        HS["hooks-server.js<br/>HTTP 127.0.0.1"]
-        AR["arbiter.js<br/>classes d'attention"]
+        BR["tmux.ts<br/>control mode"]
+        HS["hooks-server.ts<br/>HTTP 127.0.0.1"]
+        AR["arbiter.ts<br/>classes d'attention"]
         DB[("SQLite<br/>run/fleet.db")]
     end
     subgraph Renderer["Renderer"]
@@ -197,7 +197,7 @@ décroissante puis par ancienneté (`since`), donc une demande ancienne de class
   lu, pas deviné.
 - Toutes les sessions restent vivantes et rendues ; la bascule est instantanée.
 - L'arbitre est une machine à états pure (horloge et timers injectés), testable
-  hors Electron (`test/arbiter.test.js`).
+  hors Electron (`test/main/arbiter.test.ts`).
 - Le journal `hook_events` est append-only et survit aux relances : on peut
   rejouer l'historique d'attention d'une flotte.
 

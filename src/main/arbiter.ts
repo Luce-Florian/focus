@@ -1,64 +1,83 @@
-'use strict';
+import { EventEmitter } from 'node:events';
 
-const { EventEmitter } = require('node:events');
-
-/**
- * Attention classes. Focus always goes to the highest class on screen.
- * Class 0 means "this session needs nothing from the human": it is background
- * work and must never occupy the foreground while something else is waiting.
- */
-const CLS = {
-  GONE: -1,
-  RUNNING: 0,      // working on its own
-  IDLE: 1,         // turn finished, awaiting the next instruction
-  WAIT_INPUT: 2,   // Notification: idle nudge
-  WAIT_PERM: 3     // Notification: blocking permission prompt
-};
-
-const STATES = {
-  BOOTING: 'booting',
-  RUNNING: 'running',
-  WAITING_PERM: 'waiting_perm',
-  WAITING_INPUT: 'waiting_input',
-  IDLE: 'idle',
-  GONE: 'gone'
-};
-
-const STATE_CLASS = {
-  [STATES.BOOTING]: CLS.RUNNING,
-  [STATES.RUNNING]: CLS.RUNNING,
-  [STATES.IDLE]: CLS.IDLE,
-  [STATES.WAITING_INPUT]: CLS.WAIT_INPUT,
-  [STATES.WAITING_PERM]: CLS.WAIT_PERM,
-  [STATES.GONE]: CLS.GONE
-};
-
-const CLASS_LABEL = {
-  [CLS.WAIT_PERM]: 'permission',
-  [CLS.WAIT_INPUT]: 'attente',
-  [CLS.IDLE]: 'tour terminé',
-  [CLS.RUNNING]: 'travaille',
-  [CLS.GONE]: 'terminée'
-};
+import {
+  CLS,
+  STATES,
+  STATE_CLASS,
+  CLASS_LABEL,
+  type AttentionClass,
+  type SessionState,
+  type HookEventMessage,
+  type HookPayload,
+  type SwitchInfo,
+  type FleetSnapshot,
+  type SessionSnapshot
+} from '../shared/protocol.ts';
+import type { ArbiterStore } from './db.ts';
 
 // Proof that the session moved on by itself: its claim on the human is stale.
 const PROGRESS_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse']);
 
-const DEFAULTS = {
+interface ArbiterGuards {
   // Do not yank the view away while the human is mid-keystroke.
-  typingGraceMs: 2500,
+  typingGraceMs: number;
   // Minimum time on a session before an automatic switch may fire again.
-  dwellMs: 1200,
+  dwellMs: number;
   // A manual pick is respected for a while, even if something louder arrives.
+  manualStickyMs: number;
+}
+
+const DEFAULTS: ArbiterGuards = {
+  typingGraceMs: 2500,
+  dwellMs: 1200,
   manualStickyMs: 10000
 };
 
-function classifyNotification(payload) {
-  const message = String(payload.message || '');
+export function classifyNotification(payload: HookPayload): { state: SessionState; reason: string } {
+  const message = typeof payload.message === 'string' ? payload.message : '';
   if (/waiting for your input/i.test(message)) {
     return { state: STATES.WAITING_INPUT, reason: message || 'en attente de saisie' };
   }
   return { state: STATES.WAITING_PERM, reason: message || 'permission demandée' };
+}
+
+export interface RegisterSession {
+  readonly uuid: string;
+  readonly label: string;
+  readonly cwd: string;
+  readonly paneId: string;
+  readonly windowId: string;
+}
+
+interface SessionRecord {
+  uuid: string;
+  label: string;
+  cwd: string;
+  paneId: string;
+  windowId: string;
+  state: SessionState;
+  reason: string;
+  since: number;
+  lastEvent: string | null;
+  updatedAt: number;
+}
+
+interface Timer {
+  unref?(): void;
+}
+type Schedule = (fn: () => void, ms: number) => Timer;
+
+export interface ArbiterOptions {
+  store: ArbiterStore;
+  now?: () => number;
+  schedule?: Schedule;
+  options?: Partial<ArbiterGuards>;
+}
+
+interface ArbiterEvents {
+  change: [];
+  orphan: [{ uuid: string; event: string }];
+  switch: [SwitchInfo];
 }
 
 /**
@@ -73,27 +92,33 @@ function classifyNotification(payload) {
  *   - recent typing, a recent switch, a manual pick or a pin all defer the move
  *     rather than cancel it; the decision is replayed when the guard expires.
  */
-class Arbiter extends EventEmitter {
-  constructor({ store, now = () => Date.now(), schedule = setTimeout, options = {} } = {}) {
+export class Arbiter extends EventEmitter<ArbiterEvents> {
+  readonly sessions = new Map<string, SessionRecord>();
+  focused: string | null = null;
+  pinned = false;
+  lastSwitch: SwitchInfo | null = null;
+
+  private readonly store: ArbiterStore;
+  private readonly now: () => number;
+  private readonly schedule: Schedule;
+  private readonly opt: ArbiterGuards;
+
+  private stickyUntil = 0;
+  private lastSwitchAt = 0;
+  private lastInputAt = 0;
+  private timer: Timer | null = null;
+
+  constructor({ store, now = () => Date.now(), schedule = setTimeout, options = {} }: ArbiterOptions) {
     super();
     this.store = store;
     this.now = now;
     this.schedule = schedule;
     this.opt = { ...DEFAULTS, ...options };
-
-    this.sessions = new Map();
-    this.focused = null;
-    this.pinned = false;
-    this.stickyUntil = 0;
-    this.lastSwitchAt = 0;
-    this.lastInputAt = 0;
-    this.lastSwitch = null;
-    this._timer = null;
   }
 
-  register(session) {
+  register(session: RegisterSession): SessionRecord {
     const ts = this.now();
-    const rec = {
+    const rec: SessionRecord = {
       uuid: session.uuid,
       label: session.label,
       cwd: session.cwd,
@@ -113,22 +138,22 @@ class Arbiter extends EventEmitter {
     return rec;
   }
 
-  byPane(paneId) {
+  byPane(paneId: string): SessionRecord | null {
     for (const s of this.sessions.values()) if (s.paneId === paneId) return s;
     return null;
   }
 
-  byWindow(windowId) {
+  byWindow(windowId: string): SessionRecord | null {
     for (const s of this.sessions.values()) if (s.windowId === windowId) return s;
     return null;
   }
 
-  cls(uuid) {
+  cls(uuid: string): AttentionClass {
     const s = this.sessions.get(uuid);
     return s ? STATE_CLASS[s.state] : CLS.GONE;
   }
 
-  handleHook({ uuid, event, payload }) {
+  handleHook({ uuid, event, payload }: HookEventMessage): void {
     const ts = this.now();
     this.store.logHookEvent(uuid, event, payload, ts);
 
@@ -157,7 +182,7 @@ class Arbiter extends EventEmitter {
   }
 
   /** Pane or window died without a SessionEnd hook. */
-  markGone(uuid) {
+  markGone(uuid: string): void {
     const s = this.sessions.get(uuid);
     if (!s) return;
     this._setState(s, STATES.GONE, 'pane fermé', this.now());
@@ -166,12 +191,12 @@ class Arbiter extends EventEmitter {
   }
 
   /** Keystrokes reaching a pane: the human is busy there right now. */
-  noteInput(uuid) {
+  noteInput(uuid: string): void {
     if (uuid === this.focused) this.lastInputAt = this.now();
   }
 
   /** Manual pick: honoured immediately, then protected for a short while. */
-  focus(uuid) {
+  focus(uuid: string): void {
     if (!this.sessions.has(uuid)) return;
     const ts = this.now();
     this.stickyUntil = ts + this.opt.manualStickyMs;
@@ -180,14 +205,14 @@ class Arbiter extends EventEmitter {
   }
 
   /** Hard lock: automatic switching is suspended until unpinned. */
-  setPinned(pinned) {
-    this.pinned = Boolean(pinned);
+  setPinned(pinned: boolean): void {
+    this.pinned = pinned;
     if (!this.pinned) this.evaluate();
     this.emit('change');
   }
 
   /** Explicitly drop the current session and hand the floor to the queue. */
-  leave() {
+  leave(): void {
     this.pinned = false;
     this.stickyUntil = 0;
     this.lastInputAt = 0;
@@ -199,35 +224,37 @@ class Arbiter extends EventEmitter {
   }
 
   /** Sessions claiming attention, best first, focused one excluded. */
-  queue() {
+  queue(): SessionRecord[] {
     return [...this.sessions.values()]
       .filter((s) => s.uuid !== this.focused && STATE_CLASS[s.state] > CLS.RUNNING)
       .sort((a, b) => STATE_CLASS[b.state] - STATE_CLASS[a.state] || a.since - b.since);
   }
 
-  _bestCandidate() {
-    return this.queue()[0] || null;
+  private _bestCandidate(): SessionRecord | null {
+    return this.queue()[0] ?? null;
   }
 
   /** Any live session, most recently active first. Used only as a fallback. */
-  _bestLive() {
-    return [...this.sessions.values()]
-      .filter((s) => s.uuid !== this.focused && s.state !== STATES.GONE)
-      .sort((a, b) => STATE_CLASS[b.state] - STATE_CLASS[a.state] || b.updatedAt - a.updatedAt)[0] || null;
+  private _bestLive(): SessionRecord | null {
+    return (
+      [...this.sessions.values()]
+        .filter((s) => s.uuid !== this.focused && s.state !== STATES.GONE)
+        .sort((a, b) => STATE_CLASS[b.state] - STATE_CLASS[a.state] || b.updatedAt - a.updatedAt)[0] ?? null
+    );
   }
 
   /**
    * The whole focus policy. Idempotent, so it can be replayed by a timer once
    * a guard expires.
    */
-  evaluate() {
+  evaluate(): void {
     const ts = this.now();
     const candidate = this._bestCandidate();
 
     // A dead pane is never worth looking at: leave it at once, guards or not.
     const current = this.focused ? this.sessions.get(this.focused) : null;
     if (this.focused && (!current || STATE_CLASS[current.state] === CLS.GONE)) {
-      const fallback = candidate || this._bestLive();
+      const fallback = candidate ?? this._bestLive();
       if (fallback) {
         this._switchTo(fallback.uuid, candidate ? CLASS_LABEL[STATE_CLASS[fallback.state]] : 'session suivante', ts);
       } else {
@@ -262,17 +289,17 @@ class Arbiter extends EventEmitter {
     this.emit('change');
   }
 
-  _rearm(delay) {
-    if (this._timer) return;
-    this._timer = this.schedule(() => {
-      this._timer = null;
+  private _rearm(delay: number): void {
+    if (this.timer) return;
+    this.timer = this.schedule(() => {
+      this.timer = null;
       this.evaluate();
       this.emit('change');
     }, Math.ceil(delay));
-    if (this._timer && typeof this._timer.unref === 'function') this._timer.unref();
+    this.timer.unref?.();
   }
 
-  _switchTo(uuid, reason, ts) {
+  private _switchTo(uuid: string, reason: string, ts: number): void {
     if (this.focused === uuid) return;
     const from = this.focused;
     this.focused = uuid;
@@ -282,7 +309,7 @@ class Arbiter extends EventEmitter {
     this.emit('switch', this.lastSwitch);
   }
 
-  _setState(s, state, reason, ts) {
+  private _setState(s: SessionRecord, state: SessionState, reason: string, ts: number): void {
     if (s.state !== state) s.since = ts;
     s.state = state;
     s.reason = reason;
@@ -291,29 +318,28 @@ class Arbiter extends EventEmitter {
     else this.store.deleteQueue(s.uuid);
   }
 
-  snapshot() {
+  snapshot(): FleetSnapshot {
     const queue = this.queue();
     const rank = new Map(queue.map((s, i) => [s.uuid, i]));
+    const sessions: SessionSnapshot[] = [...this.sessions.values()].map((s) => ({
+      uuid: s.uuid,
+      label: s.label,
+      cwd: s.cwd,
+      paneId: s.paneId,
+      state: s.state,
+      cls: STATE_CLASS[s.state],
+      clsLabel: s.state === STATES.BOOTING ? 'démarrage' : CLASS_LABEL[STATE_CLASS[s.state]],
+      reason: s.reason,
+      lastEvent: s.lastEvent,
+      since: s.since,
+      updatedAt: s.updatedAt,
+      rank: rank.get(s.uuid) ?? -1
+    }));
     return {
       focused: this.focused,
       pinned: this.pinned,
       lastSwitch: this.lastSwitch,
-      sessions: [...this.sessions.values()].map((s) => ({
-        uuid: s.uuid,
-        label: s.label,
-        cwd: s.cwd,
-        paneId: s.paneId,
-        state: s.state,
-        cls: STATE_CLASS[s.state],
-        clsLabel: s.state === STATES.BOOTING ? 'démarrage' : CLASS_LABEL[STATE_CLASS[s.state]],
-        reason: s.reason,
-        lastEvent: s.lastEvent,
-        since: s.since,
-        updatedAt: s.updatedAt,
-        rank: rank.has(s.uuid) ? rank.get(s.uuid) : -1
-      }))
+      sessions
     };
   }
 }
-
-module.exports = { Arbiter, STATES, CLS, CLASS_LABEL, classifyNotification };

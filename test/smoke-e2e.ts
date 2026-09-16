@@ -1,60 +1,64 @@
-'use strict';
-
 /**
  * End-to-end smoke test without Electron: real tmux control mode, real HTTP
  * hook endpoint, real arbiter, real SQLite. Panes POST simulated Claude Code
  * hook payloads with curl, which exercises the exact URL-based join the app
  * uses in production.
  *
- *   node test/smoke-e2e.js
+ *   node dist/test/smoke-e2e.js
  */
 
-const assert = require('node:assert');
-const crypto = require('node:crypto');
-const path = require('node:path');
-const fs = require('node:fs');
-const os = require('node:os');
+import assert from 'node:assert';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-const { open } = require('../src/main/db');
-const { TmuxBridge } = require('../src/main/tmux');
-const { startHooksServer } = require('../src/main/hooks-server');
-const { Arbiter } = require('../src/main/arbiter');
-const { writeSessionSettings } = require('../src/main/session-settings');
+import { Arbiter } from '../src/main/arbiter.ts';
+import { open } from '../src/main/db.ts';
+import { startHooksServer } from '../src/main/hooks-server.ts';
+import { writeSessionSettings } from '../src/main/session-settings.ts';
+import { TmuxBridge } from '../src/main/tmux.ts';
+import { hookUrl, type HookEventName } from '../src/shared/protocol.ts';
+import { shQuote } from '../src/shared/sh.ts';
 
 const HOST = '127.0.0.1';
 const SOCKET = 'fleet-smoke';
 const SESSION = 'smoke';
-const HOOK_EVENTS = ['SessionStart', 'PreToolUse', 'Notification', 'Stop'];
+const HOOK_EVENTS: readonly HookEventName[] = ['SessionStart', 'PreToolUse', 'Notification', 'Stop'];
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function post(url, json) {
+function post(url: string, json: unknown): string {
   return `curl -sS -X POST -H 'content-type: application/json' -d ${shQuote(JSON.stringify(json))} ${shQuote(url)} >/dev/null`;
 }
 
-async function main() {
+interface SessionSpec {
+  readonly label: string;
+  readonly script: readonly string[];
+}
+
+async function main(): Promise<void> {
   const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-smoke-'));
   const store = open(path.join(tmpdir, 'fleet.db'));
-  const output = new Map(); // paneId -> accumulated text
+  const output = new Map<string, string>(); // paneId -> accumulated text
 
-  const hooks = await startHooksServer({ host: HOST, onEvent: (e) => arbiter.handleHook(e) });
   const arbiter = new Arbiter({ store });
+  const hooks = await startHooksServer({ host: HOST, onEvent: (e) => { arbiter.handleHook(e); } });
 
   const bridge = new TmuxBridge({ socket: SOCKET, session: SESSION });
   await bridge.createServer();
   bridge.attach();
   bridge.on('output', (paneId, bytes) => {
-    output.set(paneId, (output.get(paneId) || '') + bytes.toString('utf8'));
+    output.set(paneId, (output.get(paneId) ?? '') + bytes.toString('utf8'));
   });
   bridge.on('window-closed', (w) => {
     const s = arbiter.byWindow(w);
     if (s) arbiter.markGone(s.uuid);
   });
 
-  const url = (uuid, event) => `http://${HOST}:${hooks.port}/h/${hooks.token}/${uuid}/${event}`;
+  const url = (uuid: string, event: string) => hookUrl(HOST, hooks.port, hooks.token, uuid, event);
 
-  const specs = [
+  const specs: readonly SessionSpec[] = [
     {
       label: 'alpha',
       script: [
@@ -81,7 +85,7 @@ async function main() {
     }
   ];
 
-  const uuids = {};
+  const uuids: Record<string, string> = {};
   for (const spec of specs) {
     const uuid = crypto.randomUUID();
     uuids[spec.label] = uuid;
@@ -94,28 +98,36 @@ async function main() {
     });
     arbiter.register({ uuid, label: spec.label, cwd: tmpdir, paneId, windowId });
   }
+  const alpha = uuids.alpha;
+  const beta = uuids.beta;
+  assert.ok(alpha && beta, 'both sessions registered');
 
-  const checks = [];
-  const check = (name, fn) => {
-    try { fn(); checks.push(`  ok   ${name}`); }
-    catch (err) { checks.push(`  FAIL ${name}\n       ${err.message}`); process.exitCode = 1; }
+  const checks: string[] = [];
+  const check = (name: string, fn: () => void) => {
+    try {
+      fn();
+      checks.push(`  ok   ${name}`);
+    } catch (err) {
+      checks.push(`  FAIL ${name}\n       ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
   };
 
   await sleep(2200);
   check('a background worker loses the floor to a real claim', () => {
-    assert.equal(arbiter.focused, uuids.beta, 'alpha only works, beta needs the human');
-    assert.equal(arbiter.lastSwitch.reason, 'permission');
+    assert.equal(arbiter.focused, beta, 'alpha only works, beta needs the human');
+    assert.equal(arbiter.lastSwitch?.reason, 'permission');
   });
 
   await sleep(1600);
   check('a weaker claim does not take the floor back', () => {
-    assert.equal(arbiter.focused, uuids.beta, 'alpha went idle, beta is still blocking');
-    assert.deepEqual(arbiter.queue().map((s) => s.uuid), [uuids.alpha]);
+    assert.equal(arbiter.focused, beta, 'alpha went idle, beta is still blocking');
+    assert.deepEqual(arbiter.queue().map((s) => s.uuid), [alpha]);
   });
 
   await sleep(1800);
   check('answering hands the floor to the next best claim', () => {
-    assert.equal(arbiter.focused, uuids.alpha);
+    assert.equal(arbiter.focused, alpha);
     assert.equal(arbiter.queue().length, 0);
   });
 
@@ -127,13 +139,13 @@ async function main() {
 
   check('events landed in sqlite', () => {
     const rows = store.recentEvents(50);
-    const names = rows.map((r) => `${r.event}`);
+    const names = rows.map((r) => r.event);
     assert.ok(names.includes('Notification'), 'Notification persisted');
     assert.ok(names.includes('Stop'), 'Stop persisted');
   });
 
   check('send-keys reaches the focused pane', () => {
-    assert.ok(arbiter.sessions.get(uuids.beta).paneId.startsWith('%'));
+    assert.ok(arbiter.sessions.get(beta)?.paneId.startsWith('%'));
   });
 
   console.log('\n' + checks.join('\n') + '\n');
@@ -145,7 +157,7 @@ async function main() {
   console.log(process.exitCode ? 'SMOKE FAILED' : 'SMOKE PASSED');
 }
 
-main().catch((err) => {
+main().catch((err: unknown) => {
   console.error(err);
   process.exit(1);
 });

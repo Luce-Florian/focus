@@ -1,4 +1,5 @@
 node_modules/
+dist/
 
 # Generated at runtime: per-session settings carry a hook token, fleet.db is local state.
 run/*
