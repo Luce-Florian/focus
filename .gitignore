@@ -1,0 +1,11 @@
+node_modules/
+
+# Generated at runtime: per-session settings carry a hook token, fleet.db is local state.
+run/*
+!run/.gitkeep
+
+# Working directories of the fleet's Claude sessions.
+workspaces/*/*
+!workspaces/*/.gitkeep
+
+.DS_Store

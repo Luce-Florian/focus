@@ -1,0 +1,23 @@
+<meta charset="utf-8" />
+<title>fleet — arbitrage d'attention</title>
+<link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+<link rel="stylesheet" href="style.css" />
+<div id="app">
+  <header id="topbar">
+    <span id="dot" class="dot"></span>
+    <span id="title">—</span>
+    <span id="reason" class="reason"></span>
+    <span class="spacer"></span>
+    <button id="pin" title="Fige le focus sur cette session">épingler</button>
+    <button id="leave" title="Rend la main à la file">passer</button>
+  </header>
+
+  <main id="stage">
+    <div id="empty">rien ne réclame ton attention</div>
+    <div id="toast" hidden></div>
+  </main>
+
+  <footer id="rail"></footer>
+</div>
+<script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script src="app.js"></script>
