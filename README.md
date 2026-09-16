@@ -65,7 +65,10 @@ interpretation.
 | piece | choice | why |
 |---|---|---|
 | shell | Electron 44 (Node 24) | one window, terminals plus arbiter UI |
-| terminal | xterm.js (`@xterm/xterm`), UMD, no bundler | one instance per pane, always live |
+| language | TypeScript, strict | attention classes, hook payloads, tmux control-mode messages, the `contextBridge` API and SQLite rows are typed at every process boundary (`src/shared/protocol.ts`), not just documented |
+| bundler | esbuild | three entry points — main (`esm`/node), preload (`cjs`/node), renderer (`iife`/browser) — plus one bundle per test file; `tsc` only type-checks, esbuild does the actual compile |
+| linter | ESLint + typescript-eslint (`strictTypeChecked`, `stylisticTypeChecked`) | conventions enforced, not merely documented |
+| terminal | xterm.js (`@xterm/xterm`) | one instance per pane, always live; inlined into the renderer bundle instead of loaded as a separate `<script>` |
 | multiplexer | tmux 3.6, control mode | event stream instead of `capture-pane` polling |
 | events | Claude Code HTTP hooks | POSTed to a loopback endpoint in the main process |
 | storage | `node:sqlite` | built into Node 24, no native rebuild |
@@ -76,13 +79,14 @@ interpretation.
 `make help` is the entry point and lists every command.
 
 ```
-make build    # install dependencies, then check every source file
-make lint     # parse every JS source file
-make test     # arbiter state machine
-make smoke    # end-to-end: real tmux, real HTTP hooks, real SQLite
-make check    # lint + test + smoke
-make start    # launch the app
-make clean    # kill the POC tmux server, drop run artifacts
+make build     # install dependencies, then compile every entry point with esbuild
+make typecheck # tsc --noEmit, strict
+make lint      # ESLint, typescript-eslint
+make test      # arbiter state machine
+make smoke     # end-to-end: real tmux, real HTTP hooks, real SQLite
+make check     # typecheck + lint + test + smoke
+make start     # launch the app
+make clean     # kill the POC tmux server, drop run artifacts and dist/
 ```
 
 ## Layout
@@ -91,20 +95,28 @@ make clean    # kill the POC tmux server, drop run artifacts
 .
 ├── Makefile                  entry point for every command (make help)
 ├── CLAUDE.md -> README.md    project memory, same file
+├── tsconfig.json              strict TypeScript config (noEmit: esbuild compiles)
+├── eslint.config.js           typescript-eslint strictTypeChecked + stylisticTypeChecked
+├── scripts/
+│   └── build.mjs               esbuild: main, preload, renderer and test bundles
 ├── src/
+│   ├── shared/
+│   │   └── protocol.ts        attention classes, hook payloads, tmux/contextBridge/SQLite shapes
 │   ├── main/
-│   │   ├── index.js          Electron main: wires bridge, hooks, arbiter, IPC
-│   │   ├── arbiter.js        attention classes, focus policy, guards
-│   │   ├── tmux.js           control mode bridge, octal decoder, send-keys
-│   │   ├── hooks-server.js   loopback hook endpoint, identity from the URL
-│   │   ├── session-settings.js  per-session `--settings` file generator
-│   │   ├── db.js             SQLite schema and queries
-│   │   └── config.js         sessions, paths, tmux socket, hook events
-│   ├── preload.js            contextBridge: state, output, input, focus, pin
-│   └── renderer/             topbar, full-bleed terminal, second-plane rail
+│   │   ├── index.ts           Electron main: wires bridge, hooks, arbiter, IPC
+│   │   ├── arbiter.ts         attention classes, focus policy, guards
+│   │   ├── tmux.ts            control mode bridge, octal decoder, send-keys
+│   │   ├── hooks-server.ts    loopback hook endpoint, identity from the URL
+│   │   ├── session-settings.ts  per-session `--settings` file generator
+│   │   ├── db.ts              SQLite schema and queries
+│   │   └── config.ts          sessions, paths, tmux socket, hook events
+│   ├── preload.ts             contextBridge: state, output, input, focus, pin
+│   └── renderer/              topbar, full-bleed terminal, second-plane rail
 ├── test/
-│   ├── arbiter.test.js       state machine, injected clock and timers
-│   └── smoke-e2e.js          full stack without Electron
+│   ├── main/                  one *.test.ts per src/main module
+│   ├── shared/                 protocol.test.ts
+│   └── smoke-e2e.ts           full stack without Electron
+├── dist/                      generated: esbuild output, gitignored
 ├── run/                      generated: settings files, fleet.db
 └── workspaces/{alpha,beta}/  working directory of each Claude session
 ```
@@ -113,4 +125,4 @@ SQLite (`run/fleet.db`) holds the session registry, the current claims and an
 append-only `hook_events` log. Electron owns the tmux lifecycle: every launch
 starts from a clean fleet, the event log survives.
 
-Sessions and working directories are declared in `src/main/config.js`.
+Sessions and working directories are declared in `src/main/config.ts`.
