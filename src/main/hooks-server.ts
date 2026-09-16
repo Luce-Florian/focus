@@ -7,7 +7,7 @@ const MAX_BODY = 1 << 20;
 
 export interface StartHooksServerOptions {
   readonly host: string;
-  onEvent(message: HookEventMessage): void;
+  readonly onEvent: (message: HookEventMessage) => void;
 }
 
 export interface HooksServer {
@@ -32,13 +32,25 @@ export function startHooksServer({ host, onEvent }: StartHooksServerOptions): Pr
       res.end(JSON.stringify(body));
     };
 
-    if (req.method !== 'POST') return reply(405, { error: 'method not allowed' });
+    if (req.method !== 'POST') {
+      reply(405, { error: 'method not allowed' });
+      return;
+    }
 
     const parts = (req.url ?? '').split('/').filter(Boolean);
-    if (parts.length !== 4 || parts[0] !== 'h') return reply(404, { error: 'not found' });
+    if (parts.length !== 4 || parts[0] !== 'h') {
+      reply(404, { error: 'not found' });
+      return;
+    }
     const [, urlToken, uuid, event] = parts;
-    if (urlToken !== token) return reply(403, { error: 'bad token' });
-    if (!uuid || !event) return reply(404, { error: 'not found' });
+    if (urlToken !== token) {
+      reply(403, { error: 'bad token' });
+      return;
+    }
+    if (!uuid || !event) {
+      reply(404, { error: 'not found' });
+      return;
+    }
 
     let body = '';
     let tooBig = false;

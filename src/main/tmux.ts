@@ -52,14 +52,14 @@ export interface WindowPane {
   readonly paneId: string;
 }
 
-type TmuxBridgeEvents = {
+interface TmuxBridgeEvents {
   output: [paneId: string, bytes: Buffer];
   'window-closed': [windowId: string];
   stderr: [data: string];
   'control-exit': [code: string];
   notification: [line: string];
   detached: [code: number | null];
-};
+}
 
 export class TmuxBridge extends EventEmitter<TmuxBridgeEvents> {
   private readonly socket: string;
@@ -80,7 +80,7 @@ export class TmuxBridge extends EventEmitter<TmuxBridgeEvents> {
   cli(args: readonly string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       execFile('tmux', ['-L', this.socket, ...args], (err, stdout, stderr) => {
-        if (err) return reject(new Error(`tmux ${args.join(' ')}: ${stderr.trim() || err.message}`));
+        if (err) { reject(new Error(`tmux ${args.join(' ')}: ${stderr.trim() || err.message}`)); return; }
         resolve(stdout.trim());
       });
     });
@@ -114,7 +114,7 @@ export class TmuxBridge extends EventEmitter<TmuxBridgeEvents> {
     });
     this.proc = proc;
     proc.stdout.setEncoding('latin1');
-    proc.stdout.on('data', (chunk: string) => this._feed(chunk));
+    proc.stdout.on('data', (chunk: string) => { this._feed(chunk); });
     proc.stderr.setEncoding('utf8');
     proc.stderr.on('data', (d: string) => this.emit('stderr', d));
     proc.on('exit', (code) => this.emit('detached', code));
@@ -171,7 +171,7 @@ export class TmuxBridge extends EventEmitter<TmuxBridgeEvents> {
   /** Send a command down the control channel; replies arrive in FIFO order. */
   cmd(line: string): Promise<string[]> {
     return new Promise((resolve, reject) => {
-      if (!this.proc || this.proc.killed) return reject(new Error('control channel not attached'));
+      if (!this.proc || this.proc.killed) { reject(new Error('control channel not attached')); return; }
       this.pending.push({ resolve, reject });
       this.proc.stdin.write(line + '\n');
     });

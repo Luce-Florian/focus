@@ -17,7 +17,7 @@ function rawPost(port: number, urlPath: string, body: string): Promise<number> {
       },
       (res) => {
         res.resume();
-        res.on('end', () => resolve(res.statusCode ?? 0));
+        res.on('end', () => { resolve(res.statusCode ?? 0); });
       }
     );
     req.on('error', reject);
@@ -27,7 +27,7 @@ function rawPost(port: number, urlPath: string, body: string): Promise<number> {
 
 const post = (port: number, urlPath: string, json: unknown) => rawPost(port, urlPath, JSON.stringify(json));
 
-test('a correctly-authenticated POST decodes uuid, event and payload from the URL', async () => {
+void test('a correctly-authenticated POST decodes uuid, event and payload from the URL', async () => {
   const events: HookEventMessage[] = [];
   const hooks = await startHooksServer({ host: '127.0.0.1', onEvent: (e) => events.push(e) });
   try {
@@ -40,7 +40,7 @@ test('a correctly-authenticated POST decodes uuid, event and payload from the UR
   }
 });
 
-test('a wrong token is rejected before the event ever reaches the arbiter', async () => {
+void test('a wrong token is rejected before the event ever reaches the arbiter', async () => {
   const events: HookEventMessage[] = [];
   const hooks = await startHooksServer({ host: '127.0.0.1', onEvent: (e) => events.push(e) });
   try {
@@ -52,7 +52,7 @@ test('a wrong token is rejected before the event ever reaches the arbiter', asyn
   }
 });
 
-test('a malformed JSON body is captured as _parseError instead of throwing', async () => {
+void test('a malformed JSON body is captured as _parseError instead of throwing', async () => {
   const events: HookEventMessage[] = [];
   const hooks = await startHooksServer({ host: '127.0.0.1', onEvent: (e) => events.push(e) });
   try {
@@ -66,13 +66,13 @@ test('a malformed JSON body is captured as _parseError instead of throwing', asy
   }
 });
 
-test('a GET request is rejected, a malformed URL is 404', async () => {
+void test('a GET request is rejected, a malformed URL is 404', async () => {
   const hooks = await startHooksServer({ host: '127.0.0.1', onEvent: () => {} });
   try {
     const get = await new Promise<number>((resolve, reject) => {
       const req = http.request({ host: '127.0.0.1', port: hooks.port, path: '/h/x/y/z', method: 'GET' }, (res) => {
         res.resume();
-        res.on('end', () => resolve(res.statusCode ?? 0));
+        res.on('end', () => { resolve(res.statusCode ?? 0); });
       });
       req.on('error', reject);
       req.end();

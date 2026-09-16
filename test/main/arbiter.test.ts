@@ -64,7 +64,7 @@ function settle(ctx: Ctx) {
   ctx.advance(5000);
 }
 
-test('background work never holds the foreground', () => {
+void test('background work never holds the foreground', () => {
   const ctx = build();
   settle(ctx);
   assert.equal(ctx.arbiter.focused, 'a');
@@ -73,7 +73,7 @@ test('background work never holds the foreground', () => {
   assert.equal(ctx.arbiter.lastSwitch?.reason, 'permission');
 });
 
-test('a stronger claim preempts a weaker one', () => {
+void test('a stronger claim preempts a weaker one', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.handleHook(hook('a', 'Stop')); // idle, class 1
@@ -85,7 +85,7 @@ test('a stronger claim preempts a weaker one', () => {
   assert.equal(ctx.arbiter.focused, 'c');
 });
 
-test('an equal claim never steals: ties keep the incumbent', () => {
+void test('an equal claim never steals: ties keep the incumbent', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.handleHook(hook('a', 'Notification', PERM));
@@ -96,7 +96,7 @@ test('an equal claim never steals: ties keep the incumbent', () => {
   assert.deepEqual(ctx.arbiter.queue().map((s) => s.uuid), ['b']);
 });
 
-test('answering the current prompt hands the floor to the next claim', () => {
+void test('answering the current prompt hands the floor to the next claim', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.handleHook(hook('a', 'Notification', PERM));
@@ -107,7 +107,7 @@ test('answering the current prompt hands the floor to the next claim', () => {
   assert.equal(ctx.arbiter.focused, 'b');
 });
 
-test('recent typing defers the switch, the timer then replays it', () => {
+void test('recent typing defers the switch, the timer then replays it', () => {
   const ctx = build({ typingGraceMs: 2500, dwellMs: 0 });
   settle(ctx);
   ctx.arbiter.noteInput('a');
@@ -117,7 +117,7 @@ test('recent typing defers the switch, the timer then replays it', () => {
   assert.equal(ctx.arbiter.focused, 'b', 'grace expired, the deferred switch fires');
 });
 
-test('dwell keeps two back-to-back claims from flickering', () => {
+void test('dwell keeps two back-to-back claims from flickering', () => {
   const ctx = build({ dwellMs: 1200, typingGraceMs: 0 });
   settle(ctx);
   ctx.arbiter.handleHook(hook('b', 'Notification', IDLE));
@@ -128,7 +128,7 @@ test('dwell keeps two back-to-back claims from flickering', () => {
   assert.equal(ctx.arbiter.focused, 'c');
 });
 
-test('pin suspends automatic switching and releasing it catches up', () => {
+void test('pin suspends automatic switching and releasing it catches up', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.setPinned(true);
@@ -139,7 +139,7 @@ test('pin suspends automatic switching and releasing it catches up', () => {
   assert.equal(ctx.arbiter.focused, 'b');
 });
 
-test('a manual pick is protected for its sticky window', () => {
+void test('a manual pick is protected for its sticky window', () => {
   const ctx = build({ manualStickyMs: 10000 });
   settle(ctx);
   ctx.arbiter.focus('c');
@@ -150,7 +150,7 @@ test('a manual pick is protected for its sticky window', () => {
   assert.equal(ctx.arbiter.focused, 'b');
 });
 
-test('a dead session releases the floor immediately', () => {
+void test('a dead session releases the floor immediately', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.handleHook(hook('b', 'Notification', IDLE));
@@ -160,7 +160,7 @@ test('a dead session releases the floor immediately', () => {
   assert.equal(ctx.arbiter.focused, 'a');
 });
 
-test('explicit leave promotes the best claim and clears the guards', () => {
+void test('explicit leave promotes the best claim and clears the guards', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.handleHook(hook('a', 'Notification', PERM));
@@ -169,14 +169,14 @@ test('explicit leave promotes the best claim and clears the guards', () => {
   assert.equal(ctx.arbiter.focused, 'b');
 });
 
-test('leave with nothing claiming attention focuses nothing', () => {
+void test('leave with nothing claiming attention focuses nothing', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.leave();
   assert.equal(ctx.arbiter.focused, null);
 });
 
-test('queue is ordered by class then by age of the claim', () => {
+void test('queue is ordered by class then by age of the claim', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.setPinned(true);
@@ -188,7 +188,7 @@ test('queue is ordered by class then by age of the claim', () => {
   assert.deepEqual(ctx.arbiter.queue().map((s) => s.uuid), ['c', 'b']);
 });
 
-test('SessionEnd clears the claim of a background session', () => {
+void test('SessionEnd clears the claim of a background session', () => {
   const ctx = build();
   settle(ctx);
   ctx.arbiter.setPinned(true);
@@ -198,9 +198,9 @@ test('SessionEnd clears the claim of a background session', () => {
   assert.equal(ctx.arbiter.sessions.get('b')?.state, STATES.GONE);
 });
 
-test('hook for an unknown uuid is reported, never crashes', () => {
+void test('hook for an unknown uuid is reported, never crashes', () => {
   const ctx = build();
-  const orphans: Array<{ uuid: string; event: string }> = [];
+  const orphans: { uuid: string; event: string }[] = [];
   ctx.arbiter.on('orphan', (o) => orphans.push(o));
   ctx.arbiter.handleHook(hook('zzz', 'Stop'));
   assert.deepEqual(orphans, [{ uuid: 'zzz', event: 'Stop' }]);

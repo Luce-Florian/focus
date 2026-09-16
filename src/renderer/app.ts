@@ -3,21 +3,21 @@ import '@xterm/xterm/css/xterm.css';
 
 import type { SessionSnapshot, FleetSnapshot } from '../shared/protocol.ts';
 
-function required<T extends HTMLElement>(id: string): T {
+function required(id: string): HTMLElement {
   const el = document.getElementById(id);
   if (!el) throw new Error(`#${id} is missing from index.html`);
-  return el as T;
+  return el;
 }
 
-const stage = required<HTMLElement>('stage');
-const rail = required<HTMLElement>('rail');
-const titleEl = required<HTMLElement>('title');
-const reasonEl = required<HTMLElement>('reason');
-const dotEl = required<HTMLElement>('dot');
-const emptyEl = required<HTMLElement>('empty');
-const toastEl = required<HTMLElement>('toast');
-const pinBtn = required<HTMLButtonElement>('pin');
-const leaveBtn = required<HTMLButtonElement>('leave');
+const stage = required('stage');
+const rail = required('rail');
+const titleEl = required('title');
+const reasonEl = required('reason');
+const dotEl = required('dot');
+const emptyEl = required('empty');
+const toastEl = required('toast');
+const pinBtn = required('pin');
+const leaveBtn = required('leave');
 
 interface TermEntry {
   readonly term: Terminal;
@@ -46,7 +46,7 @@ function makeTerm(paneId: string): TermEntry {
   });
   term.open(el);
   term.resize(geometry.cols, geometry.rows);
-  term.onData((data) => window.fleet.input(paneId, data));
+  term.onData((data) => { window.fleet.input(paneId, data); });
 
   const entry: TermEntry = { term, el };
   terms.set(paneId, entry);
@@ -114,7 +114,7 @@ function render(): void {
         `<span><span class="name">${s.label}</span>` +
         `<div class="sub">${s.clsLabel} · ${elapsed(s.since)}</div></span>` +
         (s.rank >= 0 ? `<span class="rank">#${s.rank + 1}</span>` : '');
-      chip.onclick = () => window.fleet.focus(s.uuid);
+      chip.onclick = () => { window.fleet.focus(s.uuid); };
       return chip;
     })
   );
@@ -151,12 +151,12 @@ window.fleet.onState((s) => {
   render();
 });
 
-pinBtn.onclick = () => window.fleet.pin(!state.pinned);
-leaveBtn.onclick = () => window.fleet.leave();
+pinBtn.onclick = () => { window.fleet.pin(!state.pinned); };
+leaveBtn.onclick = () => { window.fleet.leave(); };
 window.addEventListener('resize', applyGeometry);
 setInterval(render, 1000); // keeps the rail's elapsed times honest
 
-window.fleet.ready().then((s) => {
+void window.fleet.ready().then((s) => {
   state = s;
   applyGeometry();
   render();

@@ -17,7 +17,7 @@ function withStore(fn: (store: ReturnType<typeof open>) => void): void {
   }
 }
 
-test('a registered session can be read back by uuid', () => {
+void test('a registered session can be read back by uuid', () => {
   withStore((store) => {
     store.insertSession({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1', state: 'booting', createdAt: 1000 });
     const row = store.db.prepare('SELECT * FROM sessions WHERE uuid = ?').get('a');
@@ -27,7 +27,7 @@ test('a registered session can be read back by uuid', () => {
   });
 });
 
-test('updating state moves the session on and bumps updated_at', () => {
+void test('updating state moves the session on and bumps updated_at', () => {
   withStore((store) => {
     store.insertSession({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1', state: 'booting', createdAt: 1000 });
     store.updateSessionState('a', 'running', 2000);
@@ -38,7 +38,7 @@ test('updating state moves the session on and bumps updated_at', () => {
   });
 });
 
-test('the queue keeps one entry per session, refreshed in place without losing its enqueue time', () => {
+void test('the queue keeps one entry per session, refreshed in place without losing its enqueue time', () => {
   withStore((store) => {
     store.upsertQueue('a', 3, 'permission', 1000);
     store.upsertQueue('a', 2, 'attente', 5000); // same session, later refresh: class changes, age does not
@@ -48,18 +48,19 @@ test('the queue keeps one entry per session, refreshed in place without losing i
   });
 });
 
-test('hook events append to the log and come back most-recent first', () => {
+void test('hook events append to the log and come back most-recent first', () => {
   withStore((store) => {
     store.logHookEvent('a', 'Stop', { hook_event_name: 'Stop' }, 1000);
     store.logHookEvent('a', 'Notification', { message: 'hi' }, 2000);
     const [latest] = store.recentEvents(10);
     assert.ok(latest);
     assert.equal(latest.event, 'Notification');
-    assert.equal(JSON.parse(latest.payload).message, 'hi');
+    const payload = JSON.parse(latest.payload) as { message: string };
+    assert.equal(payload.message, 'hi');
   });
 });
 
-test('every launch starts from a clean fleet: sessions and the queue do not survive a restart', () => {
+void test('every launch starts from a clean fleet: sessions and the queue do not survive a restart', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'fleet-db-'));
   const dbPath = path.join(dir, 'fleet.db');
   try {

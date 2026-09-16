@@ -34,7 +34,7 @@ const DEFAULTS: ArbiterGuards = {
 };
 
 export function classifyNotification(payload: HookPayload): { state: SessionState; reason: string } {
-  const message = String(payload.message ?? '');
+  const message = typeof payload.message === 'string' ? payload.message : '';
   if (/waiting for your input/i.test(message)) {
     return { state: STATES.WAITING_INPUT, reason: message || 'en attente de saisie' };
   }
@@ -62,21 +62,23 @@ interface SessionRecord {
   updatedAt: number;
 }
 
-type Timer = { unref?(): void };
+interface Timer {
+  unref?(): void;
+}
 type Schedule = (fn: () => void, ms: number) => Timer;
 
 export interface ArbiterOptions {
   store: ArbiterStore;
-  now?(): number;
+  now?: () => number;
   schedule?: Schedule;
   options?: Partial<ArbiterGuards>;
 }
 
-type ArbiterEvents = {
+interface ArbiterEvents {
   change: [];
   orphan: [{ uuid: string; event: string }];
   switch: [SwitchInfo];
-};
+}
 
 /**
  * Attention arbiter.
@@ -204,7 +206,7 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
 
   /** Hard lock: automatic switching is suspended until unpinned. */
   setPinned(pinned: boolean): void {
-    this.pinned = Boolean(pinned);
+    this.pinned = pinned;
     if (!this.pinned) this.evaluate();
     this.emit('change');
   }

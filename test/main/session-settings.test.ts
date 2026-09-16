@@ -6,6 +6,22 @@ import path from 'node:path';
 
 import { writeSessionSettings } from '../../src/main/session-settings.ts';
 
+interface ParsedEntry {
+  readonly matcher?: string;
+  readonly hooks: readonly { readonly url: string }[];
+}
+
+interface ParsedSettings {
+  readonly permissions: { readonly defaultMode: string };
+  readonly hooks: Record<string, readonly ParsedEntry[]>;
+}
+
+function first<T>(arr: readonly T[] | undefined): T {
+  const item = arr?.[0];
+  assert.ok(item, 'expected a first element');
+  return item;
+}
+
 function withTempDir(fn: (dir: string) => void): void {
   const dir = mkdtempSync(path.join(tmpdir(), 'session-settings-'));
   try {
@@ -15,7 +31,7 @@ function withTempDir(fn: (dir: string) => void): void {
   }
 }
 
-test('the settings file merges hooks and forces real permission prompts', () => {
+void test('the settings file merges hooks and forces real permission prompts', () => {
   withTempDir((runDir) => {
     const file = writeSessionSettings({
       runDir,
@@ -27,17 +43,17 @@ test('the settings file merges hooks and forces real permission prompts', () => 
     });
 
     assert.equal(file, path.join(runDir, 'abc-123.settings.json'));
-    const settings = JSON.parse(readFileSync(file, 'utf8'));
+    const settings = JSON.parse(readFileSync(file, 'utf8')) as ParsedSettings;
 
     assert.equal(settings.permissions.defaultMode, 'default');
     assert.equal(
-      settings.hooks.SessionStart[0].hooks[0].url,
+      first(first(settings.hooks.SessionStart).hooks).url,
       'http://127.0.0.1:4321/h/tok/abc-123/SessionStart'
     );
   });
 });
 
-test('PreToolUse / PostToolUse hooks carry a wildcard matcher, the rest do not', () => {
+void test('PreToolUse / PostToolUse hooks carry a wildcard matcher, the rest do not', () => {
   withTempDir((runDir) => {
     const file = writeSessionSettings({
       runDir,
@@ -47,9 +63,9 @@ test('PreToolUse / PostToolUse hooks carry a wildcard matcher, the rest do not',
       token: 'tok',
       events: ['PreToolUse', 'Stop']
     });
-    const settings = JSON.parse(readFileSync(file, 'utf8'));
+    const settings = JSON.parse(readFileSync(file, 'utf8')) as ParsedSettings;
 
-    assert.equal(settings.hooks.PreToolUse[0].matcher, '*');
-    assert.equal(settings.hooks.Stop[0].matcher, undefined);
+    assert.equal(first(settings.hooks.PreToolUse).matcher, '*');
+    assert.equal(first(settings.hooks.Stop).matcher, undefined);
   });
 });

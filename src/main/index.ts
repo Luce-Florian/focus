@@ -48,10 +48,12 @@ async function bootFleet(): Promise<void> {
 
   arbiter = new Arbiter({ store });
   arbiter.on('change', pushState);
-  arbiter.on('orphan', ({ uuid, event }) => console.warn(`[hooks] ${event} for unknown session ${uuid}`));
-  arbiter.on('switch', ({ from, to, reason }) =>
-    console.log(`[focus] ${from ? from.slice(0, 8) : 'none'} -> ${to.slice(0, 8)} (${reason})`)
-  );
+  arbiter.on('orphan', ({ uuid, event }) => {
+    console.warn(`[hooks] ${event} for unknown session ${uuid}`);
+  });
+  arbiter.on('switch', ({ from, to, reason }) => {
+    console.log(`[focus] ${from ? from.slice(0, 8) : 'none'} -> ${to.slice(0, 8)} (${reason})`);
+  });
 
   bridge = new TmuxBridge({ socket: cfg.TMUX_SOCKET, session: cfg.TMUX_SESSION });
   await bridge.createServer();
@@ -64,8 +66,12 @@ async function bootFleet(): Promise<void> {
     const s = arbiter?.byWindow(windowId);
     if (s) arbiter?.markGone(s.uuid);
   });
-  bridge.on('stderr', (d) => console.error('[tmux]', d.trim()));
-  bridge.on('control-exit', (r) => console.warn('[tmux] control channel exited', r));
+  bridge.on('stderr', (d) => {
+    console.error('[tmux]', d.trim());
+  });
+  bridge.on('control-exit', (r) => {
+    console.warn('[tmux] control channel exited', r);
+  });
 
   const claudeBin = resolveClaude();
 
@@ -104,10 +110,10 @@ function createWindow(): void {
     backgroundColor: '#101014',
     webPreferences: { preload: path.join(import.meta.dirname, 'preload.cjs') }
   });
-  win.loadFile(path.join(import.meta.dirname, 'renderer', 'index.html'));
+  void win.loadFile(path.join(import.meta.dirname, 'renderer', 'index.html'));
 }
 
-app.whenReady().then(async () => {
+void app.whenReady().then(async () => {
   createWindow();
   try {
     await bootFleet();
@@ -122,27 +128,36 @@ ipcMain.handle('fleet:ready', (): FleetSnapshot =>
 ipcMain.on('pane:input', (_e, paneId: string, data: string) => {
   const s = arbiter?.byPane(paneId);
   if (s) arbiter?.noteInput(s.uuid);
-  bridge?.sendKeys(paneId, data).catch((err: Error) => console.error('[tmux] send-keys', err.message));
+  bridge?.sendKeys(paneId, data).catch((err: unknown) => {
+    console.error('[tmux] send-keys', err instanceof Error ? err.message : err);
+  });
 });
 ipcMain.on('fleet:pin', (_e, pinned: boolean) => arbiter?.setPinned(pinned));
 ipcMain.on('fleet:focus', (_e, uuid: string) => arbiter?.focus(uuid));
 ipcMain.on('fleet:leave', () => arbiter?.leave());
 ipcMain.on('fleet:resize', (_e, cols: number, rows: number) => {
-  bridge?.setClientSize(cols, rows).catch(() => {});
+  bridge?.setClientSize(cols, rows).catch(() => undefined);
 });
 
-app.on('window-all-closed', () => app.quit());
+app.on('window-all-closed', () => {
+  app.quit();
+});
 
-app.on('before-quit', async (e) => {
+app.on('before-quit', (e) => {
   if (!bridge) return;
   e.preventDefault();
   const b = bridge;
   bridge = null;
-  try {
-    await b.kill();
-  } catch {
-    // Nothing left to kill.
-  }
-  store?.close();
-  app.quit();
+  // Electron's listener must stay synchronous: the cleanup itself is async
+  // (killing the tmux control channel, closing the store), so it runs as an
+  // explicitly-unhandled promise rather than as the listener's own return value.
+  void (async () => {
+    try {
+      await b.kill();
+    } catch {
+      // Nothing left to kill.
+    }
+    store?.close();
+    app.quit();
+  })();
 });

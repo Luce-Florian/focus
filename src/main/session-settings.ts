@@ -14,12 +14,12 @@ interface HookEntry {
   readonly hooks: readonly HttpHook[];
 }
 
-type ClaudeSessionSettings = {
+interface ClaudeSessionSettings {
   readonly hooks: Partial<Record<HookEventName, readonly HookEntry[]>>;
   readonly permissions: {
     readonly defaultMode: 'default';
   };
-};
+}
 
 export interface WriteSessionSettingsOptions {
   readonly runDir: string;

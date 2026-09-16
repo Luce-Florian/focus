@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "start": "electron .",
-    "test": "node --test dist/test/*.test.js",
+    "test": "node --test $(find dist/test -name '*.test.js')",
     "smoke": "node dist/test/smoke-e2e.js"
   },
   "keywords": [],

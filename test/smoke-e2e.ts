@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   const output = new Map<string, string>(); // paneId -> accumulated text
 
   const arbiter = new Arbiter({ store });
-  const hooks = await startHooksServer({ host: HOST, onEvent: (e) => arbiter.handleHook(e) });
+  const hooks = await startHooksServer({ host: HOST, onEvent: (e) => { arbiter.handleHook(e); } });
 
   const bridge = new TmuxBridge({ socket: SOCKET, session: SESSION });
   await bridge.createServer();
