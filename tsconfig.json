@@ -19,7 +19,11 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "noImplicitOverride": true
+    "noImplicitOverride": true,
+
+    // app.ts's `import '@xterm/xterm/css/xterm.css'` is a real file esbuild
+    // inlines at bundle time; tsc has no type for a stylesheet and never will.
+    "noUncheckedSideEffectImports": false
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }
