@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    /* Node 24 / Electron 44 target: esbuild does the actual transpilation and
+       bundling (see scripts/build.mjs), tsc only type-checks. */
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "types": ["node"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
