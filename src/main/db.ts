@@ -1,11 +1,37 @@
-'use strict';
+import { mkdirSync } from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
-const fs = require('node:fs');
-const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
+import type { HookPayload, QueueRow, SessionState, HookEventRow } from '../shared/protocol.ts';
 
-function open(dbPath) {
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+export interface NewSession {
+  readonly uuid: string;
+  readonly label: string;
+  readonly cwd: string;
+  readonly paneId: string | null;
+  readonly windowId: string | null;
+  readonly state: SessionState;
+  readonly createdAt: number;
+}
+
+/** The subset of the store the arbiter depends on; see `test/main/arbiter.test.ts`'s fake. */
+export interface ArbiterStore {
+  insertSession(session: NewSession): void;
+  updateSessionState(uuid: string, state: SessionState, ts: number): void;
+  logHookEvent(uuid: string, event: string, payload: HookPayload, ts: number): void;
+  upsertQueue(uuid: string, cls: number, reason: string, ts: number): void;
+  deleteQueue(uuid: string): void;
+}
+
+export interface Store extends ArbiterStore {
+  readonly db: DatabaseSync;
+  readQueue(): QueueRow[];
+  recentEvents(limit: number): HookEventRow[];
+  close(): void;
+}
+
+export function open(dbPath: string): Store {
+  mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -69,15 +95,13 @@ function open(dbPath) {
       db.prepare('DELETE FROM queue WHERE uuid = ?').run(uuid);
     },
     readQueue() {
-      return db.prepare('SELECT * FROM queue ORDER BY class DESC, enqueued_at ASC').all();
+      return db.prepare('SELECT * FROM queue ORDER BY class DESC, enqueued_at ASC').all() as unknown as QueueRow[];
     },
     recentEvents(limit) {
-      return db.prepare('SELECT * FROM hook_events ORDER BY id DESC LIMIT ?').all(limit);
+      return db.prepare('SELECT * FROM hook_events ORDER BY id DESC LIMIT ?').all(limit) as unknown as HookEventRow[];
     },
     close() {
       db.close();
     }
   };
 }
-
-module.exports = { open };

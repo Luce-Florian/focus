@@ -71,6 +71,37 @@ export type HookPayload = Record<string, unknown>;
 
 export interface HookEventMessage {
   uuid: string;
-  event: HookEventName;
+  // Whatever the URL's last segment is: the HTTP endpoint never validates it
+  // against HOOK_EVENT_NAMES, it only routes on `uuid` and the auth token.
+  event: string;
   payload: HookPayload;
+}
+
+/** `sessions` table row (`src/main/db.ts`). */
+export interface SessionRow {
+  uuid: string;
+  label: string;
+  cwd: string;
+  pane_id: string | null;
+  window_id: string | null;
+  state: SessionState;
+  created_at: number;
+  updated_at: number;
+}
+
+/** `hook_events` table row: the append-only log that survives a restart. */
+export interface HookEventRow {
+  id: number;
+  uuid: string;
+  event: string;
+  payload: string; // JSON-encoded HookPayload
+  ts: number;
+}
+
+/** `queue` table row: sessions currently claiming attention. */
+export interface QueueRow {
+  uuid: string;
+  class: AttentionClass;
+  reason: string | null;
+  enqueued_at: number;
 }
