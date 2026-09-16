@@ -137,3 +137,15 @@ export interface FleetSnapshot {
   lastSwitch: SwitchInfo | null;
   sessions: SessionSnapshot[];
 }
+
+/** The `contextBridge` API the sandboxed preload exposes as `window.fleet`. */
+export interface FleetBridge {
+  onState(cb: (state: FleetSnapshot) => void): void;
+  onOutput(cb: (paneId: string, bytes: ArrayBuffer) => void): void;
+  ready(): Promise<FleetSnapshot>;
+  input(paneId: string, data: string): void;
+  focus(uuid: string): void;
+  leave(): void;
+  pin(pinned: boolean): void;
+  resize(cols: number, rows: number): void;
+}
