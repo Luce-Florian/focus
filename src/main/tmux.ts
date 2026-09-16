@@ -1,7 +1,5 @@
-'use strict';
-
-const { spawn, execFile } = require('node:child_process');
-const { EventEmitter } = require('node:events');
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 
 const OCTAL = /^[0-7]{3}$/;
 
@@ -11,11 +9,11 @@ const OCTAL = /^[0-7]{3}$/;
  * Bytes >= 0x80 are passed through raw, so UTF-8 survives untouched as long as
  * the stream is read as latin1 (one char == one byte).
  */
-function decodeOutput(text) {
+export function decodeOutput(text: string): Buffer {
   const bytes = Buffer.allocUnsafe(text.length);
   let n = 0;
   for (let i = 0; i < text.length; i++) {
-    if (text[i] === '\\' && OCTAL.test(text.slice(i + 1, i + 4))) {
+    if (text.charAt(i) === '\\' && OCTAL.test(text.slice(i + 1, i + 4))) {
       bytes[n++] = parseInt(text.slice(i + 1, i + 4), 8);
       i += 3;
     } else {
@@ -25,23 +23,61 @@ function decodeOutput(text) {
   return Buffer.from(bytes.subarray(0, n));
 }
 
-function toHexKeys(str) {
+export function toHexKeys(str: string): string[] {
   return Array.from(Buffer.from(str, 'utf8'), (b) => b.toString(16).padStart(2, '0'));
 }
 
-class TmuxBridge extends EventEmitter {
-  constructor({ socket, session }) {
+interface PendingCommand {
+  resolve(lines: string[]): void;
+  reject(err: Error): void;
+}
+
+interface ControlBlock {
+  lines: string[];
+}
+
+export interface TmuxBridgeOptions {
+  readonly socket: string;
+  readonly session: string;
+}
+
+export interface NewSessionWindowOptions {
+  readonly label: string;
+  readonly cwd: string;
+  readonly command: string;
+}
+
+export interface WindowPane {
+  readonly windowId: string;
+  readonly paneId: string;
+}
+
+type TmuxBridgeEvents = {
+  output: [paneId: string, bytes: Buffer];
+  'window-closed': [windowId: string];
+  stderr: [data: string];
+  'control-exit': [code: string];
+  notification: [line: string];
+  detached: [code: number | null];
+};
+
+export class TmuxBridge extends EventEmitter<TmuxBridgeEvents> {
+  private readonly socket: string;
+  private readonly session: string;
+  private proc: ChildProcessWithoutNullStreams | null = null;
+  private stdoutTail = '';
+  private block: ControlBlock | null = null;
+  private readonly pending: PendingCommand[] = [];
+  private placeholderWindow = '';
+
+  constructor({ socket, session }: TmuxBridgeOptions) {
     super();
     this.socket = socket;
     this.session = session;
-    this.proc = null;
-    this.stdoutTail = '';
-    this.block = null;
-    this.pending = [];
   }
 
   /** One-shot tmux command outside the control channel (setup / teardown). */
-  cli(args) {
+  cli(args: readonly string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       execFile('tmux', ['-L', this.socket, ...args], (err, stdout, stderr) => {
         if (err) return reject(new Error(`tmux ${args.join(' ')}: ${stderr.trim() || err.message}`));
@@ -50,7 +86,7 @@ class TmuxBridge extends EventEmitter {
     });
   }
 
-  async createServer() {
+  async createServer(): Promise<void> {
     try {
       await this.cli(['kill-session', '-t', this.session]);
     } catch {
@@ -69,25 +105,24 @@ class TmuxBridge extends EventEmitter {
     // Panes keep the size we hand them, independent of any other client.
     await this.cli(['set-option', '-g', 'window-size', 'latest']);
     // Window 0 is the idle placeholder that keeps the session alive.
-    this.placeholderWindow = await this.cli([
-      'list-windows', '-t', this.session, '-F', '#{window_id}'
-    ]);
+    this.placeholderWindow = await this.cli(['list-windows', '-t', this.session, '-F', '#{window_id}']);
   }
 
-  attach() {
-    this.proc = spawn('tmux', ['-L', this.socket, '-C', 'attach-session', '-t', this.session], {
+  attach(): void {
+    const proc = spawn('tmux', ['-L', this.socket, '-C', 'attach-session', '-t', this.session], {
       stdio: ['pipe', 'pipe', 'pipe']
     });
-    this.proc.stdout.setEncoding('latin1');
-    this.proc.stdout.on('data', (chunk) => this._feed(chunk));
-    this.proc.stderr.setEncoding('utf8');
-    this.proc.stderr.on('data', (d) => this.emit('stderr', d));
-    this.proc.on('exit', (code) => this.emit('detached', code));
+    this.proc = proc;
+    proc.stdout.setEncoding('latin1');
+    proc.stdout.on('data', (chunk: string) => this._feed(chunk));
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', (d: string) => this.emit('stderr', d));
+    proc.on('exit', (code) => this.emit('detached', code));
   }
 
-  _feed(chunk) {
+  private _feed(chunk: string): void {
     this.stdoutTail += chunk;
-    let idx;
+    let idx: number;
     while ((idx = this.stdoutTail.indexOf('\n')) !== -1) {
       const line = this.stdoutTail.slice(0, idx).replace(/\r$/, '');
       this.stdoutTail = this.stdoutTail.slice(idx + 1);
@@ -95,7 +130,7 @@ class TmuxBridge extends EventEmitter {
     }
   }
 
-  _line(line) {
+  private _line(line: string): void {
     if (this.block) {
       if (line.startsWith('%end ') || line.startsWith('%error ')) {
         const failed = line.startsWith('%error ');
@@ -134,7 +169,7 @@ class TmuxBridge extends EventEmitter {
   }
 
   /** Send a command down the control channel; replies arrive in FIFO order. */
-  cmd(line) {
+  cmd(line: string): Promise<string[]> {
     return new Promise((resolve, reject) => {
       if (!this.proc || this.proc.killed) return reject(new Error('control channel not attached'));
       this.pending.push({ resolve, reject });
@@ -142,7 +177,7 @@ class TmuxBridge extends EventEmitter {
     });
   }
 
-  setClientSize(cols, rows) {
+  setClientSize(cols: number, rows: number): Promise<string[]> {
     return this.cmd(`refresh-client -C ${cols}x${rows}`);
   }
 
@@ -150,14 +185,14 @@ class TmuxBridge extends EventEmitter {
    * -H takes literal hex bytes, so xterm.js input (including escape sequences)
    * travels verbatim with zero quoting or key-name interpretation.
    */
-  async sendKeys(paneId, data) {
+  async sendKeys(paneId: string, data: string): Promise<void> {
     const hex = toHexKeys(data);
     for (let i = 0; i < hex.length; i += 200) {
       await this.cmd(`send-keys -t ${paneId} -H ${hex.slice(i, i + 200).join(' ')}`);
     }
   }
 
-  async newSessionWindow({ label, cwd, command }) {
+  async newSessionWindow({ label, cwd, command }: NewSessionWindowOptions): Promise<WindowPane> {
     const out = await this.cli([
       'new-window', '-d', '-P',
       '-F', '#{window_id} #{pane_id}',
@@ -167,10 +202,11 @@ class TmuxBridge extends EventEmitter {
       command
     ]);
     const [windowId, paneId] = out.split(' ');
+    if (!windowId || !paneId) throw new Error(`unexpected tmux new-window output: ${out}`);
     return { windowId, paneId };
   }
 
-  async kill() {
+  async kill(): Promise<void> {
     if (this.proc && !this.proc.killed) {
       try {
         this.proc.stdin.write('kill-session -t ' + this.session + '\n');
@@ -186,5 +222,3 @@ class TmuxBridge extends EventEmitter {
     }
   }
 }
-
-module.exports = { TmuxBridge, decodeOutput, toHexKeys };
