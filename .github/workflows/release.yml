@@ -1,0 +1,51 @@
+# Release in two stages.
+#
+# 1. release-please accumulates the conventional commits landed on main into a
+#    release pull request: it bumps `package.json` and writes CHANGELOG.md.
+#    Nothing is published while that pull request stays open.
+# 2. Merging it tags `vX.Y.Z` and opens the GitHub Release; this same run then
+#    builds the macOS disk image and attaches it to that release.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  dmg:
+    needs: release-please
+    if: needs.release-please.outputs.released == 'true'
+    # Apple Silicon runner: a .dmg can only be built on macOS.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # No Developer ID secret is configured: electron-builder ad-hoc signs.
+      - run: npm run package
+      - run: gh release upload "$TAG" release/*.dmg --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag }}

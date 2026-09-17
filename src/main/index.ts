@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
@@ -11,7 +13,30 @@ import { TmuxBridge } from './tmux.ts';
 import type { CreateResult, CreateSessionSpec, FleetSnapshot, ModelOption } from '../shared/protocol.ts';
 
 // A wrong ROOT would otherwise fail silently, one directory join at a time.
-cfg.assertProjectRoot(cfg.ROOT);
+// Packaged, the bundle sits inside a read-only `app.asar` and derives nothing
+// from ROOT: the check only means something when running from the repository.
+if (!app.isPackaged) cfg.assertProjectRoot(cfg.ROOT);
+
+/**
+ * Launched from the Finder, a macOS application inherits
+ * `/usr/bin:/bin:/usr/sbin:/sbin` and nothing more. Both binaries the fleet
+ * spawns — `tmux` and `claude` — live where only the login shell looks
+ * (Homebrew, nvm, `~/.local/bin`), so `which claude` would fail on an
+ * installed build while working in development. Ask the login shell once,
+ * rather than guessing a list of prefixes.
+ */
+function adoptLoginPath(): void {
+  const shell = process.env.SHELL ?? '/bin/zsh';
+  try {
+    const out = execFileSync(shell, ['-ilc', 'printf %s "$PATH"'], {
+      encoding: 'utf8',
+      timeout: 5000
+    }).trim();
+    if (out) process.env.PATH = out;
+  } catch (err: unknown) {
+    console.warn('[env] login PATH unavailable:', err instanceof Error ? err.message : err);
+  }
+}
 
 let win: BrowserWindow | null = null;
 let store: Store | null = null;
@@ -29,7 +54,14 @@ function notify(text: string): void {
 }
 
 async function bootFleet(): Promise<void> {
-  store = open(cfg.DB_PATH);
+  // Installed, the application lives inside a read-only `app.asar`: the run
+  // directory cannot sit next to the bundle. `userData` is the writable
+  // per-user location macOS hands the app; from the repository, `run/` keeps
+  // settings files and the database under the developer's eyes.
+  const runDir = app.isPackaged ? path.join(app.getPath('userData'), 'run') : cfg.RUN_DIR;
+  mkdirSync(runDir, { recursive: true });
+
+  store = open(path.join(runDir, 'fleet.db'));
 
   hooks = await startHooksServer({
     host: cfg.HOOK_HOST,
@@ -76,7 +108,13 @@ async function bootFleet(): Promise<void> {
     console.warn('[tmux] control channel exited', r);
   });
 
-  fleet = createFleet({ cfg, bridge, arbiter, hooks, claudeBin: resolveClaude() });
+  fleet = createFleet({
+    cfg: { ...cfg, RUN_DIR: runDir },
+    bridge,
+    arbiter,
+    hooks,
+    claudeBin: resolveClaude()
+  });
 
   // The fleet starts empty unless config.ts seeds it; the human creates the
   // rest from the interface, on the directories they choose.
@@ -101,6 +139,7 @@ function createWindow(): void {
 }
 
 void app.whenReady().then(async () => {
+  if (app.isPackaged) adoptLoginPath();
   createWindow();
   try {
     await bootFleet();

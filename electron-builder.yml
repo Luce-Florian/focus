@@ -1,0 +1,42 @@
+# Packaging for the macOS artifact attached to every GitHub Release.
+#
+# esbuild already inlines every dependency into the three bundles, so the
+# application is `dist/` plus the manifest Electron reads to find its entry
+# point — no `node_modules` ships. The version is never written here: it comes
+# from `package.json`, which release-please bumps.
+appId: com.luce-florian.focus
+# `productName` lives in package.json: Electron itself reads it at runtime to
+# name `userData`, where the packaged build keeps `run/`.
+copyright: Florian Luce
+
+directories:
+  output: release
+
+files:
+  # The three bundles and their assets, nothing else: the tests never ship,
+  # source maps would double the payload, and every dependency is already
+  # inlined by esbuild — including xterm.js, whose stylesheet esbuild emits
+  # next to the renderer bundle as `app.css`.
+  - dist/**
+  - '!dist/test/**'
+  - '!**/*.map'
+  - package.json
+  - '!node_modules/**/*'
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  # No Developer ID certificate: `-` is the ad-hoc identity, which seals the
+  # bundle so macOS lets it start at all on Apple Silicon. Gatekeeper still
+  # quarantines the download — see the README.
+  identity: '-'
+  # The hardened runtime only buys something once the build is notarized, and
+  # under an ad-hoc signature its library validation refuses to load Electron's
+  # own frameworks. Turn it back on the day a Developer ID certificate exists.
+  hardenedRuntime: false
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}

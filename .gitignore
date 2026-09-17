@@ -1,6 +1,9 @@
 node_modules/
 dist/
 
+# electron-builder output: the disk image lives on the GitHub Release.
+release/
+
 # Generated at runtime: per-session settings carry a hook token, fleet.db is local state.
 run/*
 !run/.gitkeep
