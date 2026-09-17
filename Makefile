@@ -4,7 +4,7 @@ SHELL       := /bin/bash
 TMUX_SOCKET := fleet-poc
 
 .DEFAULT_GOAL := help
-.PHONY: help install typecheck lint build test smoke check start clean distclean
+.PHONY: help install typecheck lint build test smoke check start package clean distclean
 
 help: ## List available commands
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -33,9 +33,12 @@ check: typecheck lint test smoke ## Everything a change must pass before it land
 start: build ## Launch the Electron app and its fleet of Claude Code sessions
 	npm start
 
+package: build ## Build the macOS disk image into release/ (ad-hoc signed, arm64)
+	npm run package
+
 clean: ## Kill the POC tmux server and drop generated run artifacts
 	-tmux -L $(TMUX_SOCKET) kill-server 2>/dev/null
-	rm -rf dist run/*.settings.json run/fleet.db run/fleet.db-shm run/fleet.db-wal
+	rm -rf dist release run/*.settings.json run/fleet.db run/fleet.db-shm run/fleet.db-wal
 
 distclean: clean ## clean, plus node_modules
 	rm -rf node_modules

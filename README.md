@@ -122,6 +122,9 @@ interpretation.
 | events | Claude Code HTTP hooks | POSTed to a loopback endpoint in the main process |
 | storage | `node:sqlite` | built into Node 24, no native rebuild |
 | tests | `node:test` | fake clock and fake timers for the state machine |
+| packaging | electron-builder | one `dmg`, arm64, ad-hoc signed: the bundles plus `package.json`, no `node_modules` |
+| versioning | release-please | the version comes out of the commit history, through a release pull request nobody has to edit |
+| commits | commitlint + husky | Conventional Commits are what release-please reads, so they are checked at write time and again in CI |
 
 ## Commands
 
@@ -135,8 +138,53 @@ make test      # arbiter state machine
 make smoke     # end-to-end: real tmux, real HTTP hooks, real SQLite
 make check     # typecheck + lint + test + smoke
 make start     # launch the app
-make clean     # kill the POC tmux server, drop run artifacts and dist/
+make package   # build the macOS disk image into release/ (arm64, ad-hoc signed)
+make clean     # kill the POC tmux server, drop run artifacts, dist/ and release/
 ```
+
+## Releasing
+
+Versions are computed, never typed. Every commit landing on `main` is a
+Conventional Commit; release-please accumulates them into a *release pull
+request* that bumps `package.json` and writes `CHANGELOG.md`. Nothing is
+published while that pull request stays open.
+
+| step | where | result |
+|---|---|---|
+| `fix:` / `feat:` / `feat!:` on a pull request | `.github/workflows/check.yml` | patch / minor / major, decided by the history rather than by a human |
+| push on `main` | `.github/workflows/release.yml` | the release pull request, kept up to date |
+| merging it | same workflow | tag `vX.Y.Z`, GitHub Release, and `Focus-X.Y.Z-arm64.dmg` attached to it |
+
+`make package` builds that same disk image locally, into `release/`.
+
+The convention is enforced twice. `.husky/commit-msg` rejects a malformed
+subject at write time — installed by `make install`, therefore skippable with
+`--no-verify` or by a fresh clone. The `commits` job revalidates every commit
+of a pull request, and that one is not skippable: a subject nobody parsed is a
+version that never gets bumped.
+
+### The disk image is not notarized
+
+No Developer ID certificate is involved: electron-builder signs the bundle
+ad-hoc, which is the minimum Apple Silicon requires for an application to
+start at all. macOS still quarantines a downloaded image, so the first launch
+goes through right click → *Ouvrir*, or once:
+
+```
+xattr -dr com.apple.quarantine /Applications/Focus.app
+```
+
+### Installed, the application no longer lives in the repository
+
+Two things change when the code runs from a read-only `app.asar` instead of a
+checkout, both handled in `src/main/index.ts`:
+
+- **`run/` moves to `userData`** — `~/Library/Application Support/Focus/run`
+  holds the per-session settings files and `fleet.db`, because nothing can be
+  written next to the bundle;
+- **`PATH` comes from the login shell** — an application launched from the
+  Finder inherits `/usr/bin:/bin:/usr/sbin:/sbin`, where neither `tmux` nor
+  `claude` is found. It is read once at startup, packaged builds only.
 
 ## Layout
 
@@ -146,6 +194,13 @@ make clean     # kill the POC tmux server, drop run artifacts and dist/
 ├── CLAUDE.md -> README.md    project memory, same file
 ├── tsconfig.json              strict TypeScript config (noEmit: esbuild compiles)
 ├── eslint.config.js           typescript-eslint strictTypeChecked + stylisticTypeChecked
+├── electron-builder.yml       macOS packaging: what ships, ad-hoc signature, dmg name
+├── commitlint.config.js       Conventional Commits, the input of the version bump
+├── release-please-config.json  release type and changelog, plus its version manifest
+├── .husky/commit-msg          local half of the commit convention
+├── .github/workflows/
+│   ├── check.yml               make check on every pull request, plus commitlint
+│   └── release.yml             release pull request, then tag and dmg on merge
 ├── scripts/
 │   └── build.mjs               esbuild: main, preload, renderer and test bundles
 ├── src/
