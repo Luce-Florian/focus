@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { CLS, STATES, STATE_CLASS, CLASS_LABEL, hookUrl, parseHookPath } from '../../src/shared/protocol.ts';
+import {
+  CLS,
+  STATES,
+  STATE_CLASS,
+  CLASS_LABEL,
+  STATE_LABEL,
+  hookUrl,
+  parseHookPath
+} from '../../src/shared/protocol.ts';
 
 void test('every session state maps to an attention class', () => {
   for (const state of Object.values(STATES)) {
@@ -38,4 +46,16 @@ void test('parseHookPath rejects anything that is not a hook path', () => {
   assert.equal(parseHookPath('/h/tok/uuid'), null);
   assert.equal(parseHookPath('/nope/tok/uuid/Stop'), null);
   assert.equal(parseHookPath('/h/tok/uuid/Stop/extra'), null);
+});
+
+void test('states whose class says nothing useful carry a label of their own', () => {
+  // `booting` and `failed` both sit at a class the chip cannot describe:
+  // class 0 reads "travaille" and class -1 reads "terminée", neither of which
+  // is what the human needs to see while a launch is in flight or has failed.
+  assert.equal(typeof STATE_LABEL[STATES.BOOTING], 'string');
+  assert.equal(typeof STATE_LABEL[STATES.FAILED], 'string');
+});
+
+void test('a failed launch is as gone as a finished session, for the focus policy', () => {
+  assert.equal(STATE_CLASS[STATES.FAILED], CLS.GONE);
 });

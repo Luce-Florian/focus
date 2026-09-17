@@ -11,6 +11,9 @@ export interface NewSession {
   readonly paneId: string | null;
   readonly windowId: string | null;
   readonly state: SessionState;
+  readonly model: string | null;
+  readonly prompt: string | null;
+  readonly summary: string | null;
   readonly createdAt: number;
 }
 
@@ -21,6 +24,8 @@ export interface ArbiterStore {
   logHookEvent(uuid: string, event: string, payload: HookPayload, ts: number): void;
   upsertQueue(uuid: string, cls: number, reason: string, ts: number): void;
   deleteQueue(uuid: string): void;
+  setSummary(uuid: string, summary: string): void;
+  deleteSession(uuid: string): void;
 }
 
 export interface Store extends ArbiterStore {
@@ -28,6 +33,24 @@ export interface Store extends ArbiterStore {
   readQueue(): QueueRow[];
   recentEvents(limit: number): HookEventRow[];
   close(): void;
+}
+
+/**
+ * Columns added after the first schema shipped. `CREATE TABLE IF NOT EXISTS`
+ * never revisits an existing table, so they are applied by hand.
+ */
+const SESSION_COLUMNS: readonly (readonly [string, string])[] = [
+  ['model', 'TEXT'],
+  ['prompt', 'TEXT'],
+  ['summary', 'TEXT']
+];
+
+function migrateSessions(db: DatabaseSync): void {
+  const rows = db.prepare('PRAGMA table_info(sessions)').all() as unknown as { name: string }[];
+  const present = new Set(rows.map((c) => c.name));
+  for (const [name, type] of SESSION_COLUMNS) {
+    if (!present.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+  }
 }
 
 export function open(dbPath: string): Store {
@@ -63,18 +86,40 @@ export function open(dbPath: string): Store {
       enqueued_at INTEGER NOT NULL
     );
   `);
+  migrateSessions(db);
 
   // Electron owns the tmux lifecycle in this skeleton: every launch starts from
-  // a clean fleet. The append-only event log survives across runs.
+  // a clean fleet. The append-only event log survives across runs. Bringing
+  // dynamically created sessions back is tracked in issue #7; the model,
+  // prompt and summary columns are already persisted for it.
   db.exec('DELETE FROM sessions; DELETE FROM queue;');
 
   return {
     db,
     insertSession(s) {
       db.prepare(
-        `INSERT INTO sessions (uuid, label, cwd, pane_id, window_id, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(s.uuid, s.label, s.cwd, s.paneId, s.windowId, s.state, s.createdAt, s.createdAt);
+        `INSERT INTO sessions
+           (uuid, label, cwd, pane_id, window_id, state, model, prompt, summary, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        s.uuid,
+        s.label,
+        s.cwd,
+        s.paneId,
+        s.windowId,
+        s.state,
+        s.model,
+        s.prompt,
+        s.summary,
+        s.createdAt,
+        s.createdAt
+      );
+    },
+    setSummary(uuid, summary) {
+      db.prepare('UPDATE sessions SET summary = ? WHERE uuid = ?').run(summary, uuid);
+    },
+    deleteSession(uuid) {
+      db.prepare('DELETE FROM sessions WHERE uuid = ?').run(uuid);
     },
     updateSessionState(uuid, state, ts) {
       db.prepare('UPDATE sessions SET state = ?, updated_at = ? WHERE uuid = ?').run(state, ts, uuid);

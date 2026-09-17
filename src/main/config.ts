@@ -1,11 +1,13 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
-import type { HookEventName } from '../shared/protocol.ts';
+import type { HookEventName, ModelOption } from '../shared/protocol.ts';
 
 export interface SessionSpec {
   readonly label: string;
   readonly cwd: string;
+  readonly prompt?: string;
+  readonly model?: string;
 }
 
 /**
@@ -53,11 +55,43 @@ export const TMUX_SESSION = 'fleet';
 
 export const HOOK_HOST = '127.0.0.1';
 
-// The walking skeleton drives exactly two sessions.
-export const SESSIONS: readonly SessionSpec[] = [
-  { label: 'alpha', cwd: path.join(ROOT, 'workspaces', 'alpha') },
-  { label: 'beta', cwd: path.join(ROOT, 'workspaces', 'beta') }
+/**
+ * The fleet starts empty: sessions are created from the user interface, on a
+ * working directory the human picks. Anything listed here is only a seed.
+ */
+export const SESSIONS: readonly SessionSpec[] = [];
+
+/**
+ * One Claude process, one tmux pane rendered continuously and one live
+ * xterm.js instance per session: the ceiling is a resource decision.
+ */
+export const MAX_SESSIONS = 8;
+
+/**
+ * Printed in the pane when Claude Code exits. The pane deliberately outlives
+ * the process, so this marker is what tells a live session from a dead one.
+ * ASCII only: pane output is matched byte for byte, one char per byte.
+ */
+export const SESSION_END_MARKER = '[fleet] session ended';
+
+/**
+ * Backstop for a launch that draws nothing at all: past this delay a session
+ * still stuck on `booting` is declared failed and torn down.
+ */
+export const BOOT_TIMEOUT_MS = 15000;
+
+/** Models offered at creation. The empty id means "no --model flag". */
+export const MODELS: readonly ModelOption[] = [
+  { id: '', label: 'défaut' },
+  { id: 'opus', label: 'Opus' },
+  { id: 'sonnet', label: 'Sonnet' },
+  { id: 'haiku', label: 'Haiku' }
 ];
+
+// The initial prompt is summarised out of band, for the session tooltip.
+export const SUMMARY_MODEL = 'haiku';
+export const SUMMARY_TIMEOUT_MS = 20000;
+export const SUMMARY_MAX_CHARS = 120;
 
 // Hook events the arbiter subscribes to.
 export const HOOK_EVENTS: readonly HookEventName[] = [

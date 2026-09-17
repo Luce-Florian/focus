@@ -12,7 +12,9 @@ function fakeStore(): ArbiterStore {
     updateSessionState() {},
     logHookEvent() {},
     upsertQueue() {},
-    deleteQueue() {}
+    deleteQueue() {},
+    setSummary() {},
+    deleteSession() {}
   };
 }
 
@@ -25,9 +27,10 @@ interface Guards {
   typingGraceMs?: number;
   dwellMs?: number;
   manualStickyMs?: number;
+  bootTimeoutMs?: number;
 }
 
-function build(options: Guards = {}) {
+function harness(options: Guards = {}) {
   const clock = { t: 100000 };
   const timers: FakeTimer[] = [];
   const arbiter = new Arbiter({
@@ -39,17 +42,26 @@ function build(options: Guards = {}) {
     },
     options
   });
-  arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
-  arbiter.register({ uuid: 'b', label: 'beta', cwd: '/b', paneId: '%2', windowId: '@2' });
-  arbiter.register({ uuid: 'c', label: 'gamma', cwd: '/c', paneId: '%3', windowId: '@3' });
 
+  // Only due timers fire; the rest stay armed. The boot backstop is scheduled
+  // far ahead of the focus guards and must survive their expiry.
   const advance = (ms: number) => {
     clock.t += ms;
     const due = timers.filter((x) => x.at <= clock.t);
-    timers.length = 0;
+    for (let i = timers.length - 1; i >= 0; i--) {
+      if ((timers[i]?.at ?? 0) <= clock.t) timers.splice(i, 1);
+    }
     for (const x of due) x.fn();
   };
   return { arbiter, clock, advance };
+}
+
+function build(options: Guards = {}) {
+  const ctx = harness(options);
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  ctx.arbiter.register({ uuid: 'b', label: 'beta', cwd: '/b', paneId: '%2', windowId: '@2' });
+  ctx.arbiter.register({ uuid: 'c', label: 'gamma', cwd: '/c', paneId: '%3', windowId: '@3' });
+  return ctx;
 }
 
 type Ctx = ReturnType<typeof build>;
@@ -204,4 +216,112 @@ void test('hook for an unknown uuid is reported, never crashes', () => {
   ctx.arbiter.on('orphan', (o) => orphans.push(o));
   ctx.arbiter.handleHook(hook('zzz', 'Stop'));
   assert.deepEqual(orphans, [{ uuid: 'zzz', event: 'Stop' }]);
+});
+
+// ---- runtime creation: coming up, and failing to ----
+
+void test('the pane drawing is what brings a session up, not SessionStart', () => {
+  const ctx = harness();
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.BOOTING);
+  ctx.arbiter.noteAlive('a');
+  assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.IDLE, 'no prompt: awaiting instructions');
+});
+
+void test('a session launched with a prompt comes up working, not idle', () => {
+  const ctx = harness();
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1', prompt: 'go' });
+  ctx.arbiter.noteAlive('a');
+  assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.RUNNING);
+});
+
+void test('later output never drags a session back to its boot state', () => {
+  const ctx = harness();
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  ctx.arbiter.noteAlive('a');
+  ctx.arbiter.handleHook(hook('a', 'Notification', PERM));
+  ctx.arbiter.noteAlive('a');
+  assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.WAITING_PERM);
+});
+
+void test('the end marker before the session ever drew anything is a failed launch', () => {
+  const ctx = harness();
+  const failed: { uuid: string; label: string }[] = [];
+  ctx.arbiter.on('failed', (f) => failed.push(f));
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  ctx.arbiter.register({ uuid: 'b', label: 'beta', cwd: '/b', paneId: '%2', windowId: '@2' });
+  ctx.arbiter.noteAlive('b');
+  ctx.arbiter.noteEnded('a');
+  assert.deepEqual(failed, [{ uuid: 'a', label: 'alpha' }]);
+  assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.FAILED);
+  assert.equal(ctx.arbiter.focused, 'b', 'a pane that never came up is never worth looking at');
+});
+
+void test('the end marker after a session came up is a normal end, not a failure', () => {
+  const ctx = harness();
+  const failed: { uuid: string; label: string }[] = [];
+  ctx.arbiter.on('failed', (f) => failed.push(f));
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  ctx.arbiter.noteAlive('a');
+  ctx.arbiter.noteEnded('a');
+  assert.deepEqual(failed, []);
+  assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.GONE);
+});
+
+void test('a session that draws nothing at all trips the boot backstop', () => {
+  const ctx = harness({ bootTimeoutMs: 15000 });
+  const failed: { uuid: string; label: string }[] = [];
+  ctx.arbiter.on('failed', (f) => failed.push(f));
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  ctx.advance(15000);
+  assert.deepEqual(failed, [{ uuid: 'a', label: 'alpha' }]);
+  assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.FAILED);
+});
+
+void test('output before the backstop expires disarms it', () => {
+  const ctx = harness({ bootTimeoutMs: 15000 });
+  const failed: { uuid: string; label: string }[] = [];
+  ctx.arbiter.on('failed', (f) => failed.push(f));
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  ctx.arbiter.noteAlive('a');
+  ctx.advance(60000);
+  assert.deepEqual(failed, []);
+  assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.IDLE);
+});
+
+void test('a failed session does not count as live and can be unregistered', () => {
+  const ctx = harness({ bootTimeoutMs: 15000 });
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  ctx.advance(15000);
+  assert.equal(ctx.arbiter.live().length, 0);
+  ctx.arbiter.unregister('a');
+  assert.equal(ctx.arbiter.get('a'), null);
+  assert.equal(ctx.arbiter.focused, null);
+});
+
+void test('the summary of the initial prompt lands on the session snapshot', () => {
+  const ctx = harness();
+  ctx.arbiter.register({
+    uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1',
+    model: 'sonnet', prompt: 'migrate the billing schema and keep it reversible'
+  });
+  ctx.arbiter.setSummary('a', 'Migration réversible du schéma de facturation');
+  const s = ctx.arbiter.snapshot().sessions[0];
+  assert.ok(s);
+  assert.equal(s.model, 'sonnet');
+  assert.equal(s.summary, 'Migration réversible du schéma de facturation');
+  assert.equal(s.prompt, 'migrate the billing schema and keep it reversible');
+});
+
+void test('a created session takes the floor, even over a pending permission', () => {
+  const ctx = harness();
+  ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1' });
+  ctx.arbiter.handleHook(hook('a', 'Notification', PERM));
+  assert.equal(ctx.arbiter.focused, 'a');
+
+  ctx.arbiter.register({ uuid: 'b', label: 'beta', cwd: '/b', paneId: '%2', windowId: '@2' });
+  ctx.arbiter.focus('b'); // what createSession does: the human just asked for it
+  assert.equal(ctx.arbiter.focused, 'b');
+  ctx.arbiter.handleHook(hook('a', 'Notification', PERM));
+  assert.equal(ctx.arbiter.focused, 'b', 'the fresh session is not preempted by an older claim');
 });

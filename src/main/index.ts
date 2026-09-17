@@ -1,17 +1,14 @@
-import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import path from 'node:path';
 
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 
 import { Arbiter } from './arbiter.ts';
 import * as cfg from './config.ts';
 import { open, type Store } from './db.ts';
+import { createFleet, resolveClaude, type Fleet } from './fleet.ts';
 import { startHooksServer, type HooksServer } from './hooks-server.ts';
-import { writeSessionSettings } from './session-settings.ts';
 import { TmuxBridge } from './tmux.ts';
-import { shQuote } from '../shared/sh.ts';
-import type { FleetSnapshot } from '../shared/protocol.ts';
+import type { CreateResult, CreateSessionSpec, FleetSnapshot, ModelOption } from '../shared/protocol.ts';
 
 // A wrong ROOT would otherwise fail silently, one directory join at a time.
 cfg.assertProjectRoot(cfg.ROOT);
@@ -21,17 +18,14 @@ let store: Store | null = null;
 let bridge: TmuxBridge | null = null;
 let arbiter: Arbiter | null = null;
 let hooks: HooksServer | null = null;
-
-function resolveClaude(): string {
-  try {
-    return execFileSync('which', ['claude'], { encoding: 'utf8' }).trim();
-  } catch {
-    return 'claude';
-  }
-}
+let fleet: Fleet | null = null;
 
 function pushState(): void {
   if (win && !win.isDestroyed() && arbiter) win.webContents.send('fleet:state', arbiter.snapshot());
+}
+
+function notify(text: string): void {
+  if (win && !win.isDestroyed()) win.webContents.send('fleet:notice', text);
 }
 
 async function bootFleet(): Promise<void> {
@@ -43,7 +37,7 @@ async function bootFleet(): Promise<void> {
   });
   console.log(`[hooks] listening on http://${cfg.HOOK_HOST}:${hooks.port}`);
 
-  arbiter = new Arbiter({ store });
+  arbiter = new Arbiter({ store, options: { bootTimeoutMs: cfg.BOOT_TIMEOUT_MS } });
   arbiter.on('change', pushState);
   arbiter.on('orphan', ({ uuid, event }) => {
     console.warn(`[hooks] ${event} for unknown session ${uuid}`);
@@ -51,13 +45,25 @@ async function bootFleet(): Promise<void> {
   arbiter.on('switch', ({ from, to, reason }) => {
     console.log(`[focus] ${from ? from.slice(0, 8) : 'none'} -> ${to.slice(0, 8)} (${reason})`);
   });
+  // A launch that never draws leaves a pane stuck on `booting`: the arbiter
+  // times it out, the fleet takes the window and the settings file down.
+  arbiter.on('failed', ({ uuid, label }) => {
+    console.warn(`[fleet] ${label} never came up, discarding ${uuid}`);
+    notify(`${label} n'a pas démarré`);
+    fleet?.discard(uuid).catch((err: unknown) => {
+      console.error('[fleet] discard', err instanceof Error ? err.message : err);
+    });
+  });
 
   bridge = new TmuxBridge({ socket: cfg.TMUX_SOCKET, session: cfg.TMUX_SESSION });
   await bridge.createServer();
   bridge.attach();
 
   bridge.on('output', (paneId, bytes) => {
+    // The renderer draws every pane, focused or not; the fleet reads the same
+    // stream for the only liveness signal it has.
     if (win && !win.isDestroyed()) win.webContents.send('pane:output', paneId, bytes);
+    fleet?.observeOutput(paneId, bytes);
   });
   bridge.on('window-closed', (windowId) => {
     const s = arbiter?.byWindow(windowId);
@@ -70,33 +76,17 @@ async function bootFleet(): Promise<void> {
     console.warn('[tmux] control channel exited', r);
   });
 
-  const claudeBin = resolveClaude();
+  fleet = createFleet({ cfg, bridge, arbiter, hooks, claudeBin: resolveClaude() });
 
+  // The fleet starts empty unless config.ts seeds it; the human creates the
+  // rest from the interface, on the directories they choose.
   for (const spec of cfg.SESSIONS) {
-    // The uuid is minted here, before the pane exists: the Claude session and
-    // the tmux pane are joined by construction, never discovered afterwards.
-    const uuid = crypto.randomUUID();
-    const settingsFile = writeSessionSettings({
-      runDir: cfg.RUN_DIR,
-      uuid,
-      host: cfg.HOOK_HOST,
-      port: hooks.port,
-      token: hooks.token,
-      events: cfg.HOOK_EVENTS
-    });
-
-    const inner = `${shQuote(claudeBin)} --session-id ${uuid} --settings ${shQuote(settingsFile)}`;
-    // Keep the pane alive after Claude exits so the final screen stays readable.
-    const command = `${inner}; printf '\\n[session ended]\\n'; exec sleep 86400`;
-
-    const { windowId, paneId } = await bridge.newSessionWindow({
-      label: spec.label,
-      cwd: spec.cwd,
-      command: `sh -c ${shQuote(command)}`
-    });
-
-    arbiter.register({ uuid, label: spec.label, cwd: spec.cwd, paneId, windowId });
-    console.log(`[fleet] ${spec.label} uuid=${uuid} pane=${paneId} window=${windowId}`);
+    try {
+      const s = await fleet.createSession(spec);
+      console.log(`[fleet] ${s.label} uuid=${s.uuid} pane=${s.paneId} window=${s.windowId}`);
+    } catch (err: unknown) {
+      console.error(`[fleet] seed ${spec.label} failed:`, err instanceof Error ? err.message : err);
+    }
   }
 }
 
@@ -122,6 +112,30 @@ void app.whenReady().then(async () => {
 ipcMain.handle('fleet:ready', (): FleetSnapshot =>
   arbiter ? arbiter.snapshot() : { sessions: [], focused: null, pinned: false, lastSwitch: null }
 );
+ipcMain.handle('fleet:models', (): readonly ModelOption[] => cfg.MODELS);
+
+ipcMain.handle('fleet:pick-dir', async (): Promise<string | null> => {
+  if (!win || win.isDestroyed()) return null;
+  const r = await dialog.showOpenDialog(win, {
+    title: 'Répertoire de travail de la session',
+    properties: ['openDirectory', 'createDirectory']
+  });
+  return r.canceled ? null : (r.filePaths[0] ?? null);
+});
+
+ipcMain.handle('fleet:create', async (_e, spec: CreateSessionSpec): Promise<CreateResult> => {
+  if (!fleet) return { ok: false, error: "la flotte n'est pas prête" };
+  try {
+    const s = await fleet.createSession(spec);
+    console.log(`[fleet] ${s.label} uuid=${s.uuid} pane=${s.paneId} window=${s.windowId}`);
+    return { ok: true, uuid: s.uuid };
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    console.error('[fleet] create failed:', error);
+    return { ok: false, error };
+  }
+});
+
 ipcMain.on('pane:input', (_e, paneId: string, data: string) => {
   const s = arbiter?.byPane(paneId);
   if (s) arbiter?.noteInput(s.uuid);

@@ -1,133 +1,234 @@
 /**
  * End-to-end smoke test without Electron: real tmux control mode, real HTTP
- * hook endpoint, real arbiter, real SQLite. Panes POST simulated Claude Code
- * hook payloads with curl, which exercises the exact URL-based join the app
- * uses in production.
+ * hook endpoint, real arbiter, real SQLite, and the real session factory.
+ *
+ * Sessions are created the way the user interface creates them — through
+ * `createFleet().createSession()` — against a stub standing in for the
+ * `claude` binary. The stub reads the very arguments the factory builds
+ * (`--session-id`, `--settings`, `--model`, the positional prompt), so the
+ * command line is exercised rather than assumed.
  *
  *   node dist/test/smoke-e2e.js
  */
 
 import assert from 'node:assert';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { Arbiter } from '../src/main/arbiter.ts';
 import { open } from '../src/main/db.ts';
+import { createFleet, type FleetConfig } from '../src/main/fleet.ts';
 import { startHooksServer } from '../src/main/hooks-server.ts';
-import { writeSessionSettings } from '../src/main/session-settings.ts';
 import { TmuxBridge } from '../src/main/tmux.ts';
-import { hookUrl, type HookEventName } from '../src/shared/protocol.ts';
-import { shQuote } from '../src/shared/sh.ts';
+import type { HookEventName } from '../src/shared/protocol.ts';
 
 const HOST = '127.0.0.1';
 const SOCKET = 'fleet-smoke';
 const SESSION = 'smoke';
-const HOOK_EVENTS: readonly HookEventName[] = ['SessionStart', 'PreToolUse', 'Notification', 'Stop'];
+const HOOK_EVENTS: readonly HookEventName[] = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'Notification',
+  'Stop',
+  'SessionEnd'
+];
+const BOOT_TIMEOUT_MS = 1500;
+const END_MARKER = '[fleet] session ended';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function post(url: string, json: unknown): string {
-  return `curl -sS -X POST -H 'content-type: application/json' -d ${shQuote(JSON.stringify(json))} ${shQuote(url)} >/dev/null`;
+/**
+ * Stub `claude`. It parses the factory's own command line, then plays the
+ * scenario named by the positional prompt.
+ */
+function writeFakeClaude(dir: string, base: string): string {
+  const file = path.join(dir, 'fake-claude');
+  fs.writeFileSync(
+    file,
+    `#!/bin/sh
+uuid=""; model=""; settings=""; prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session-id) uuid="$2"; shift 2 ;;
+    --settings)   settings="$2"; shift 2 ;;
+    --model)      model="$2"; shift 2 ;;
+    *)            prompt="$1"; shift ;;
+  esac
+done
+
+post() {
+  curl -sS -X POST -H 'content-type: application/json' -d "$2" "${base}/$uuid/$1" >/dev/null
 }
 
-interface SessionSpec {
-  readonly label: string;
-  readonly script: readonly string[];
+case "$prompt" in
+  scenario-mute)
+    # Draws nothing and never exits: only the boot backstop can catch it.
+    sleep 60 ;;
+  scenario-crash)
+    # Exits at once; the wrapper prints the end marker.
+    exit 1 ;;
+esac
+
+echo "UUID=$uuid MODEL=$model PROMPT=$prompt"
+[ -f "$settings" ] && echo "SETTINGS-OK"
+
+case "$prompt" in
+  scenario-alpha)
+    echo 'ALPHA-BANNER'
+    post SessionStart '{"hook_event_name":"SessionStart"}'
+    post PreToolUse '{"hook_event_name":"PreToolUse","tool_name":"Bash"}'
+    sleep 3
+    post Stop '{"hook_event_name":"Stop"}'
+    ;;
+  scenario-beta)
+    echo 'BETA-BANNER'
+    post SessionStart '{"hook_event_name":"SessionStart"}'
+    sleep 1
+    post Notification '{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}'
+    sleep 3
+    post PreToolUse '{"hook_event_name":"PreToolUse","tool_name":"Bash"}'
+    ;;
+esac
+sleep 60
+`
+  );
+  fs.chmodSync(file, 0o755);
+  return file;
 }
 
 async function main(): Promise<void> {
   const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-smoke-'));
+  const workdir = path.join(tmpdir, 'work');
+  fs.mkdirSync(workdir);
   const store = open(path.join(tmpdir, 'fleet.db'));
   const output = new Map<string, string>(); // paneId -> accumulated text
 
-  const arbiter = new Arbiter({ store });
-  const hooks = await startHooksServer({ host: HOST, onEvent: (e) => { arbiter.handleHook(e); } });
+  const arbiter = new Arbiter({ store, options: { bootTimeoutMs: BOOT_TIMEOUT_MS } });
+  const hooks = await startHooksServer({
+    host: HOST,
+    onEvent: (e) => {
+      arbiter.handleHook(e);
+    }
+  });
 
   const bridge = new TmuxBridge({ socket: SOCKET, session: SESSION });
   await bridge.createServer();
   bridge.attach();
+
+  // `MAX_SESSIONS` is read at call time so the ceiling check below can move it.
+  const cfg: { -readonly [K in keyof FleetConfig]: FleetConfig[K] } = {
+    RUN_DIR: tmpdir,
+    HOOK_HOST: HOST,
+    HOOK_EVENTS,
+    SESSION_END_MARKER: END_MARKER,
+    MAX_SESSIONS: 8,
+    MODELS: [
+      { id: '', label: 'défaut' },
+      { id: 'sonnet', label: 'Sonnet' }
+    ],
+    SUMMARY_MODEL: 'haiku',
+    SUMMARY_TIMEOUT_MS: 5000,
+    SUMMARY_MAX_CHARS: 120
+  };
+
+  const summarised: string[] = [];
+  const fleet = createFleet({
+    cfg,
+    bridge,
+    arbiter,
+    hooks,
+    claudeBin: writeFakeClaude(tmpdir, `http://${HOST}:${hooks.port}/h/${hooks.token}`),
+    // The out-of-band pass is stubbed: the smoke proves the wiring, not the model.
+    summarize: ({ prompt }) => {
+      summarised.push(prompt);
+      return Promise.resolve(`RÉSUMÉ ${prompt}`);
+    }
+  });
+
   bridge.on('output', (paneId, bytes) => {
     output.set(paneId, (output.get(paneId) ?? '') + bytes.toString('utf8'));
+    fleet.observeOutput(paneId, bytes);
   });
   bridge.on('window-closed', (w) => {
     const s = arbiter.byWindow(w);
     if (s) arbiter.markGone(s.uuid);
   });
-
-  const url = (uuid: string, event: string) => hookUrl(HOST, hooks.port, hooks.token, uuid, event);
-
-  const specs: readonly SessionSpec[] = [
-    {
-      label: 'alpha',
-      script: [
-        `echo 'ALPHA-BANNER'`,
-        post(url('%UUID%', 'SessionStart'), { hook_event_name: 'SessionStart' }),
-        post(url('%UUID%', 'PreToolUse'), { hook_event_name: 'PreToolUse', tool_name: 'Bash' }),
-        'sleep 3',
-        post(url('%UUID%', 'Stop'), { hook_event_name: 'Stop' })
-      ]
-    },
-    {
-      label: 'beta',
-      script: [
-        `echo 'BETA-BANNER'`,
-        post(url('%UUID%', 'SessionStart'), { hook_event_name: 'SessionStart' }),
-        'sleep 1',
-        post(url('%UUID%', 'Notification'), {
-          hook_event_name: 'Notification',
-          message: 'Claude needs your permission to use Bash'
-        }),
-        'sleep 3',
-        post(url('%UUID%', 'PreToolUse'), { hook_event_name: 'PreToolUse', tool_name: 'Bash' })
-      ]
-    }
-  ];
-
-  const uuids: Record<string, string> = {};
-  for (const spec of specs) {
-    const uuid = crypto.randomUUID();
-    uuids[spec.label] = uuid;
-    writeSessionSettings({
-      runDir: tmpdir, uuid, host: HOST, port: hooks.port, token: hooks.token, events: HOOK_EVENTS
+  arbiter.on('failed', ({ uuid }) => {
+    fleet.discard(uuid).catch((err: unknown) => {
+      console.error('[fleet] discard', err instanceof Error ? err.message : err);
     });
-    const body = spec.script.join('; ').replaceAll('%UUID%', uuid) + '; exec sleep 60';
-    const { windowId, paneId } = await bridge.newSessionWindow({
-      label: spec.label, cwd: tmpdir, command: `sh -c ${shQuote(body)}`
-    });
-    arbiter.register({ uuid, label: spec.label, cwd: tmpdir, paneId, windowId });
-  }
-  const alpha = uuids.alpha;
-  const beta = uuids.beta;
-  assert.ok(alpha && beta, 'both sessions registered');
+  });
 
   const checks: string[] = [];
+  const record = (name: string, err?: unknown) => {
+    if (err === undefined) {
+      checks.push(`  ok   ${name}`);
+      return;
+    }
+    checks.push(`  FAIL ${name}\n       ${err instanceof Error ? err.message : JSON.stringify(err)}`);
+    process.exitCode = 1;
+  };
   const check = (name: string, fn: () => void) => {
     try {
       fn();
-      checks.push(`  ok   ${name}`);
-    } catch (err) {
-      checks.push(`  FAIL ${name}\n       ${err instanceof Error ? err.message : String(err)}`);
-      process.exitCode = 1;
+      record(name);
+    } catch (err: unknown) {
+      record(name, err);
+    }
+  };
+  const acheck = async (name: string, fn: () => Promise<void>) => {
+    try {
+      await fn();
+      record(name);
+    } catch (err: unknown) {
+      record(name, err);
     }
   };
 
+  const windowCount = async (): Promise<number> =>
+    (await bridge.cli(['list-windows', '-t', SESSION, '-F', '#{window_id}'])).split('\n').filter(Boolean).length;
+
+  // ---- runtime creation, the way the interface does it ----
+
+  const alpha = await fleet.createSession({
+    cwd: workdir,
+    label: 'alpha',
+    prompt: 'scenario-alpha',
+    model: 'sonnet'
+  });
+  const beta = await fleet.createSession({ cwd: workdir, label: 'beta', prompt: 'scenario-beta', model: '' });
+
+  check('a session created at runtime is registered and takes the floor', () => {
+    assert.equal(arbiter.focused, beta.uuid, 'the human just asked for this one');
+    assert.equal(arbiter.live().length, 2);
+    assert.ok(fs.existsSync(path.join(tmpdir, `${alpha.uuid}.settings.json`)));
+  });
+
+  // Put alpha on screen, then drop the guards the manual pick just armed: what
+  // the next assertions observe is the focus policy itself, nothing else.
+  arbiter.focus(alpha.uuid);
+  arbiter.clearGuards();
+
   await sleep(2200);
   check('a background worker loses the floor to a real claim', () => {
-    assert.equal(arbiter.focused, beta, 'alpha only works, beta needs the human');
+    assert.equal(arbiter.focused, beta.uuid, 'alpha only works, beta needs the human');
     assert.equal(arbiter.lastSwitch?.reason, 'permission');
   });
 
   await sleep(1600);
   check('a weaker claim does not take the floor back', () => {
-    assert.equal(arbiter.focused, beta, 'alpha went idle, beta is still blocking');
-    assert.deepEqual(arbiter.queue().map((s) => s.uuid), [alpha]);
+    assert.equal(arbiter.focused, beta.uuid, 'alpha went idle, beta is still blocking');
+    assert.deepEqual(
+      arbiter.queue().map((s) => s.uuid),
+      [alpha.uuid]
+    );
   });
 
   await sleep(1800);
   check('answering hands the floor to the next best claim', () => {
-    assert.equal(arbiter.focused, alpha);
+    assert.equal(arbiter.focused, alpha.uuid);
     assert.equal(arbiter.queue().length, 0);
   });
 
@@ -137,15 +238,89 @@ async function main(): Promise<void> {
     assert.match(all, /BETA-BANNER/, 'background window streams too');
   });
 
+  check('the factory command line reached the binary intact', () => {
+    const all = [...output.values()].join('');
+    assert.match(all, new RegExp(`UUID=${alpha.uuid} MODEL=sonnet PROMPT=scenario-alpha`));
+    assert.match(all, /SETTINGS-OK/, 'the per-session settings file exists at launch');
+  });
+
+  check('the initial prompt is summarised out of band', () => {
+    assert.deepEqual([...summarised].sort(), ['scenario-alpha', 'scenario-beta']);
+    const s = arbiter.snapshot().sessions.find((x) => x.uuid === alpha.uuid);
+    assert.equal(s?.summary, 'RÉSUMÉ scenario-alpha');
+    assert.equal(s?.model, 'sonnet');
+  });
+
   check('events landed in sqlite', () => {
-    const rows = store.recentEvents(50);
-    const names = rows.map((r) => r.event);
+    const names = store.recentEvents(50).map((r) => r.event);
     assert.ok(names.includes('Notification'), 'Notification persisted');
     assert.ok(names.includes('Stop'), 'Stop persisted');
   });
 
+  // ---- refusals leave nothing behind ----
+
+  await acheck('an unusable working directory is refused before anything is created', async () => {
+    const before = await windowCount();
+    await assert.rejects(
+      () => fleet.createSession({ cwd: path.join(tmpdir, 'nope'), label: 'ghost' }),
+      (err: Error & { code?: string }) => err.code === 'EBADCWD'
+    );
+    assert.equal(await windowCount(), before, 'no tmux window');
+    assert.equal(arbiter.live().length, 2, 'no row');
+  });
+
+  await acheck('an unknown model is refused', async () => {
+    await assert.rejects(
+      () => fleet.createSession({ cwd: workdir, label: 'ghost', model: 'not-a-model' }),
+      (err: Error & { code?: string }) => err.code === 'EMODEL'
+    );
+  });
+
+  // ---- launches that never come up ----
+
+  const expectTornDown = (name: string, prompt: string, waitMs: number) =>
+    acheck(name, async () => {
+      const before = await windowCount();
+      const ghost = await fleet.createSession({ cwd: workdir, label: 'ghost', prompt });
+      const settingsFile = path.join(tmpdir, `${ghost.uuid}.settings.json`);
+      assert.equal(await windowCount(), before + 1);
+      assert.ok(fs.existsSync(settingsFile));
+
+      await sleep(waitMs);
+      assert.equal(arbiter.get(ghost.uuid), null, 'the row is gone');
+      assert.equal(await windowCount(), before, 'the tmux window is gone');
+      assert.ok(!fs.existsSync(settingsFile), 'the settings file is gone');
+      assert.notEqual(arbiter.focused, ghost.uuid, 'the floor moved on');
+    });
+
+  await expectTornDown('a launch that exits at once is torn down, window and file', 'scenario-crash', 1500);
+  await expectTornDown(
+    'a launch that draws nothing at all trips the boot backstop',
+    'scenario-mute',
+    BOOT_TIMEOUT_MS + 1200
+  );
+
+  // ---- the ceiling ----
+
+  await acheck('the fleet refuses to grow past its ceiling', async () => {
+    cfg.MAX_SESSIONS = arbiter.live().length;
+    await assert.rejects(
+      () => fleet.createSession({ cwd: workdir, label: 'overflow' }),
+      (err: Error & { code?: string }) => err.code === 'EFULL'
+    );
+  });
+
+  // ---- normal end of life ----
+
+  check('SessionEnd removes a session created at runtime', () => {
+    arbiter.handleHook({ uuid: beta.uuid, event: 'SessionEnd', payload: {} });
+    assert.equal(arbiter.get(beta.uuid)?.state, 'gone');
+    assert.equal(arbiter.live().length, 1);
+    assert.notEqual(arbiter.focused, beta.uuid);
+  });
+
   check('send-keys reaches the focused pane', () => {
-    assert.ok(arbiter.sessions.get(beta)?.paneId.startsWith('%'));
+    assert.ok(arbiter.get(alpha.uuid)?.paneId.startsWith('%'));
   });
 
   console.log('\n' + checks.join('\n') + '\n');

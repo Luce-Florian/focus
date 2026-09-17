@@ -9,6 +9,12 @@ function required(id: string): HTMLElement {
   return el;
 }
 
+function requiredAs<T extends HTMLElement>(id: string, ctor: abstract new () => T): T {
+  const el = required(id);
+  if (!(el instanceof ctor)) throw new Error(`#${id} is not a ${ctor.name}`);
+  return el;
+}
+
 const stage = required('stage');
 const rail = required('rail');
 const titleEl = required('title');
@@ -18,6 +24,18 @@ const emptyEl = required('empty');
 const toastEl = required('toast');
 const pinBtn = required('pin');
 const leaveBtn = required('leave');
+const newBtn = required('new');
+
+const dlg = requiredAs('create', HTMLDialogElement);
+const form = requiredAs('create-form', HTMLFormElement);
+const cwdInput = requiredAs('cwd', HTMLInputElement);
+const labelInput = requiredAs('label', HTMLInputElement);
+const promptInput = requiredAs('prompt', HTMLTextAreaElement);
+const modelSelect = requiredAs('model', HTMLSelectElement);
+const errorEl = required('create-error');
+const browseBtn = required('browse');
+const cancelBtn = required('cancel');
+const submitBtn = requiredAs('submit', HTMLButtonElement);
 
 interface TermEntry {
   readonly term: Terminal;
@@ -99,25 +117,54 @@ function render(): void {
   emptyEl.hidden = Boolean(pane);
 
   titleEl.textContent = focused ? focused.label : '—';
+  titleEl.title = focused ? tooltip(focused) : '';
   reasonEl.textContent = focused ? `${focused.clsLabel} · ${focused.reason}` : '';
   dotEl.className = `dot ${focused ? focused.state : ''}`;
   pinBtn.classList.toggle('on', state.pinned);
   pinBtn.textContent = state.pinned ? 'épinglé' : 'épingler';
 
   const others = state.sessions.filter((s) => s.uuid !== state.focused);
-  rail.replaceChildren(
-    ...others.map((s) => {
-      const chip = document.createElement('div');
-      chip.className = 'chip' + (s.rank >= 0 ? ' claiming' : '');
-      chip.innerHTML =
-        `<span class="dot ${s.state}"></span>` +
-        `<span><span class="name">${s.label}</span>` +
-        `<div class="sub">${s.clsLabel} · ${elapsed(s.since)}</div></span>` +
-        (s.rank >= 0 ? `<span class="rank">#${s.rank + 1}</span>` : '');
-      chip.onclick = () => { window.fleet.focus(s.uuid); };
-      return chip;
-    })
-  );
+  rail.replaceChildren(...others.map(chipFor));
+}
+
+/**
+ * Labels, prompts and summaries are human input now, not constants from
+ * config.ts: every one of them goes in as text, never as markup.
+ */
+function chipFor(s: SessionSnapshot): HTMLDivElement {
+  const chip = document.createElement('div');
+  chip.className = 'chip' + (s.rank >= 0 ? ' claiming' : '');
+  chip.title = tooltip(s);
+
+  const dot = document.createElement('span');
+  dot.className = `dot ${s.state}`;
+
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = s.label;
+
+  const sub = document.createElement('div');
+  sub.className = 'sub';
+  sub.textContent = `${s.clsLabel} · ${elapsed(s.since)}`;
+
+  const body = document.createElement('span');
+  body.append(name, sub);
+  chip.append(dot, body);
+
+  if (s.rank >= 0) {
+    const rank = document.createElement('span');
+    rank.className = 'rank';
+    rank.textContent = `#${s.rank + 1}`;
+    chip.append(rank);
+  }
+
+  chip.onclick = () => { window.fleet.focus(s.uuid); };
+  return chip;
+}
+
+/** The summary when the out-of-band pass answered, else the raw prompt. */
+function tooltip(s: SessionSnapshot): string {
+  return [s.summary ?? s.prompt, s.cwd].filter((x) => x !== null && x !== '').join('\n');
 }
 
 function applyGeometry(): void {
@@ -151,6 +198,65 @@ window.fleet.onState((s) => {
   render();
 });
 
+// ---- creation ----
+
+async function openCreate(): Promise<void> {
+  if (modelSelect.options.length === 0) {
+    const models = await window.fleet.models();
+    modelSelect.replaceChildren(...models.map((m) => new Option(m.label, m.id)));
+  }
+  errorEl.hidden = true;
+  submitBtn.disabled = false;
+  dlg.showModal();
+  browseBtn.focus();
+}
+
+function fail(message: string): void {
+  errorEl.textContent = message;
+  errorEl.hidden = false;
+  submitBtn.disabled = false;
+}
+
+browseBtn.onclick = () => {
+  void window.fleet.pickDir().then((dir) => {
+    if (dir === null) return;
+    cwdInput.value = dir;
+    // The directory name is the obvious label; the human overrides it or not.
+    if (!labelInput.value.trim()) labelInput.placeholder = dir.split('/').filter(Boolean).pop() ?? dir;
+  });
+};
+
+cancelBtn.onclick = () => { dlg.close(); };
+
+form.onsubmit = (e) => {
+  e.preventDefault();
+  if (!cwdInput.value) {
+    fail('choisis un répertoire de travail');
+    return;
+  }
+  submitBtn.disabled = true;
+  errorEl.hidden = true;
+  void window.fleet
+    .create({
+      cwd: cwdInput.value,
+      label: labelInput.value,
+      prompt: promptInput.value,
+      model: modelSelect.value
+    })
+    .then((r) => {
+      if (!r.ok) {
+        fail(r.error);
+        return;
+      }
+      form.reset();
+      cwdInput.value = '';
+      labelInput.placeholder = 'nom du répertoire';
+      dlg.close();
+    });
+};
+
+newBtn.onclick = () => { void openCreate(); };
+window.fleet.onNotice(toast);
 pinBtn.onclick = () => { window.fleet.pin(!state.pinned); };
 leaveBtn.onclick = () => { window.fleet.leave(); };
 window.addEventListener('resize', applyGeometry);

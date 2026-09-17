@@ -27,7 +27,9 @@ export const STATES = {
   WAITING_PERM: 'waiting_perm',
   WAITING_INPUT: 'waiting_input',
   IDLE: 'idle',
-  GONE: 'gone'
+  GONE: 'gone',
+  // Registered, but the pane never drew anything: the launch did not take.
+  FAILED: 'failed'
 } as const;
 
 export type SessionState = (typeof STATES)[keyof typeof STATES];
@@ -38,7 +40,8 @@ export const STATE_CLASS: Record<SessionState, AttentionClass> = {
   [STATES.IDLE]: CLS.IDLE,
   [STATES.WAITING_INPUT]: CLS.WAIT_INPUT,
   [STATES.WAITING_PERM]: CLS.WAIT_PERM,
-  [STATES.GONE]: CLS.GONE
+  [STATES.GONE]: CLS.GONE,
+  [STATES.FAILED]: CLS.GONE
 };
 
 export const CLASS_LABEL: Record<AttentionClass, string> = {
@@ -47,6 +50,15 @@ export const CLASS_LABEL: Record<AttentionClass, string> = {
   [CLS.IDLE]: 'tour terminé',
   [CLS.RUNNING]: 'travaille',
   [CLS.GONE]: 'terminée'
+};
+
+/**
+ * States whose own name says more than their attention class. `booting` and
+ * `failed` both sit at a class that says nothing useful on a chip.
+ */
+export const STATE_LABEL: Partial<Record<SessionState, string>> = {
+  [STATES.BOOTING]: 'démarrage',
+  [STATES.FAILED]: 'démarrage échoué'
 };
 
 /** Hook events the arbiter can subscribe a session to. */
@@ -110,6 +122,11 @@ export interface SessionRow {
   pane_id: string | null;
   window_id: string | null;
   state: SessionState;
+  // Chosen at creation; null for a session created without one.
+  model: string | null;
+  prompt: string | null;
+  // One-line description of `prompt`, produced out of band after the launch.
+  summary: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -145,6 +162,9 @@ export interface SessionSnapshot {
   label: string;
   cwd: string;
   paneId: string;
+  model: string | null;
+  prompt: string | null;
+  summary: string | null;
   state: SessionState;
   cls: AttentionClass;
   clsLabel: string;
@@ -163,13 +183,39 @@ export interface FleetSnapshot {
   sessions: SessionSnapshot[];
 }
 
+/** A model offered at session creation. The empty id means "no --model flag". */
+export interface ModelOption {
+  readonly id: string;
+  readonly label: string;
+}
+
+/** What the human fills in to start a session. Only `cwd` is required. */
+export interface CreateSessionSpec {
+  readonly cwd: string;
+  readonly label?: string;
+  readonly prompt?: string;
+  readonly model?: string;
+}
+
+/**
+ * A creation either produced a session or explained why it could not. The
+ * renderer shows `error` in the form rather than treating it as a crash.
+ */
+export type CreateResult = { ok: true; uuid: string } | { ok: false; error: string };
+
 /** The `contextBridge` API the sandboxed preload exposes as `window.fleet`. */
 export interface FleetBridge {
   onState(cb: (state: FleetSnapshot) => void): void;
   // `tmux.ts` emits a Buffer and Electron's structured clone hands the
   // renderer a Uint8Array — never a bare ArrayBuffer.
   onOutput(cb: (paneId: string, bytes: Uint8Array) => void): void;
+  // Out-of-band message for the human: a session that failed to start.
+  onNotice(cb: (text: string) => void): void;
   ready(): Promise<FleetSnapshot>;
+  models(): Promise<ModelOption[]>;
+  // Native directory picker, or null when the human cancelled.
+  pickDir(): Promise<string | null>;
+  create(spec: CreateSessionSpec): Promise<CreateResult>;
   input(paneId: string, data: string): void;
   focus(uuid: string): void;
   leave(): void;

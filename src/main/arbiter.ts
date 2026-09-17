@@ -5,6 +5,7 @@ import {
   STATES,
   STATE_CLASS,
   CLASS_LABEL,
+  STATE_LABEL,
   type AttentionClass,
   type SessionState,
   type HookEventMessage,
@@ -25,12 +26,15 @@ interface ArbiterGuards {
   dwellMs: number;
   // A manual pick is respected for a while, even if something louder arrives.
   manualStickyMs: number;
+  // A session whose pane has drawn nothing by then never came up.
+  bootTimeoutMs: number;
 }
 
 const DEFAULTS: ArbiterGuards = {
   typingGraceMs: 2500,
   dwellMs: 1200,
-  manualStickyMs: 10000
+  manualStickyMs: 10000,
+  bootTimeoutMs: 15000
 };
 
 export function classifyNotification(payload: HookPayload): { state: SessionState; reason: string } {
@@ -47,14 +51,19 @@ export interface RegisterSession {
   readonly cwd: string;
   readonly paneId: string;
   readonly windowId: string;
+  readonly model?: string | null;
+  readonly prompt?: string | null;
 }
 
-interface SessionRecord {
+export interface SessionRecord {
   uuid: string;
   label: string;
   cwd: string;
   paneId: string;
   windowId: string;
+  model: string | null;
+  prompt: string | null;
+  summary: string | null;
   state: SessionState;
   reason: string;
   since: number;
@@ -78,6 +87,8 @@ interface ArbiterEvents {
   change: [];
   orphan: [{ uuid: string; event: string }];
   switch: [SwitchInfo];
+  // A launch that never came up: the fleet takes its window and file down.
+  failed: [{ uuid: string; label: string }];
 }
 
 /**
@@ -124,6 +135,9 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
       cwd: session.cwd,
       paneId: session.paneId,
       windowId: session.windowId,
+      model: session.model ?? null,
+      prompt: session.prompt ?? null,
+      summary: null,
       state: STATES.BOOTING,
       reason: 'démarrage',
       since: ts,
@@ -132,10 +146,93 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     };
     this.sessions.set(rec.uuid, rec);
     this.store.insertSession({ ...rec, createdAt: ts });
+    this._armBootWatchdog(rec.uuid);
     if (this.focused === null) this._switchTo(rec.uuid, 'première session', ts);
     this.evaluate();
     this.emit('change');
     return rec;
+  }
+
+  /** Drop a session the arbiter registered but that never came up. */
+  unregister(uuid: string): void {
+    if (!this.sessions.delete(uuid)) return;
+    this.store.deleteQueue(uuid);
+    this.store.deleteSession(uuid);
+    if (this.focused === uuid) this.focused = null;
+    this.evaluate();
+    this.emit('change');
+  }
+
+  /** Out-of-band one-line description of the session's initial prompt. */
+  setSummary(uuid: string, summary: string): void {
+    const s = this.sessions.get(uuid);
+    if (!s || !summary) return;
+    s.summary = summary;
+    this.store.setSummary(uuid, summary);
+    this.emit('change');
+  }
+
+  /** The internal record, windowId included: used by the session factory. */
+  get(uuid: string): SessionRecord | null {
+    return this.sessions.get(uuid) ?? null;
+  }
+
+  /** Sessions that still exist as far as the fleet is concerned. */
+  live(): SessionRecord[] {
+    return [...this.sessions.values()].filter((s) => STATE_CLASS[s.state] > CLS.GONE);
+  }
+
+  /**
+   * First bytes drawn by the pane. `SessionStart` is not observed to fire
+   * (Claude Code 2.1.236, HTTP hooks), so the pane rendering at all is the
+   * only proof the process came up. A session launched with a prompt is
+   * already working; one launched without waits for its first instruction.
+   */
+  noteAlive(uuid: string): void {
+    const s = this.sessions.get(uuid);
+    if (s?.state !== STATES.BOOTING) return;
+    const ts = this.now();
+    if (s.prompt) this._setState(s, STATES.RUNNING, 'travaille', ts);
+    else this._setState(s, STATES.IDLE, 'prête', ts);
+    this.evaluate();
+    this.emit('change');
+  }
+
+  /**
+   * The pane printed the end-of-session marker: Claude Code exited. Before it
+   * ever drew anything, that is a launch that did not take.
+   */
+  noteEnded(uuid: string): void {
+    const s = this.sessions.get(uuid);
+    if (s === undefined || STATE_CLASS[s.state] === CLS.GONE) return;
+    const failed = s.state === STATES.BOOTING;
+    this._setState(
+      s,
+      failed ? STATES.FAILED : STATES.GONE,
+      failed ? 'démarrage échoué' : 'session terminée',
+      this.now()
+    );
+    if (failed) this.emit('failed', { uuid, label: s.label });
+    this.evaluate();
+    this.emit('change');
+  }
+
+  /**
+   * Backstop for a launch that draws nothing at all and never exits — no pane
+   * output, no marker, no hook. Anything the session emits leaves `booting`
+   * before this fires. The callback checks the state rather than cancelling,
+   * so an injected scheduler with no cancellation stays sound.
+   */
+  private _armBootWatchdog(uuid: string): void {
+    const timer = this.schedule(() => {
+      const s = this.sessions.get(uuid);
+      if (s?.state !== STATES.BOOTING) return;
+      this._setState(s, STATES.FAILED, 'aucun signe de vie', this.now());
+      this.emit('failed', { uuid, label: s.label });
+      this.evaluate();
+      this.emit('change');
+    }, this.opt.bootTimeoutMs);
+    timer.unref?.();
   }
 
   byPane(paneId: string): SessionRecord | null {
@@ -188,6 +285,17 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     this._setState(s, STATES.GONE, 'pane fermé', this.now());
     this.evaluate();
     this.emit('change');
+  }
+
+  /**
+   * Drop the deferral guards without moving the floor. The smoke test puts a
+   * session on screen by hand, then clears what that manual pick armed so the
+   * assertions that follow observe the focus policy and nothing else.
+   */
+  clearGuards(): void {
+    this.stickyUntil = 0;
+    this.lastSwitchAt = 0;
+    this.lastInputAt = 0;
   }
 
   /** Keystrokes reaching a pane: the human is busy there right now. */
@@ -326,9 +434,12 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
       label: s.label,
       cwd: s.cwd,
       paneId: s.paneId,
+      model: s.model,
+      prompt: s.prompt,
+      summary: s.summary,
       state: s.state,
       cls: STATE_CLASS[s.state],
-      clsLabel: s.state === STATES.BOOTING ? 'démarrage' : CLASS_LABEL[STATE_CLASS[s.state]],
+      clsLabel: STATE_LABEL[s.state] ?? CLASS_LABEL[STATE_CLASS[s.state]],
       reason: s.reason,
       lastEvent: s.lastEvent,
       since: s.since,

@@ -13,9 +13,9 @@ highest one, and switches on its own.
 |---|---|---|---|
 | 3 | `waiting_perm` | Notification: blocking permission prompt | yes |
 | 2 | `waiting_input` | Notification: idle nudge | yes |
-| 1 | `idle` | `Stop`: turn finished, awaiting instructions | yes |
+| 1 | `idle` | `Stop`, or a fresh pane: awaiting instructions | yes |
 | 0 | `running` / `booting` | working on its own | never |
-| -1 | `gone` | `SessionEnd` or dead pane | released at once |
+| -1 | `gone` / `failed` | `SessionEnd`, dead pane, or a launch that never joined | released at once |
 
 Two invariants keep automatic switching from turning into flicker:
 
@@ -27,6 +27,55 @@ Two invariants keep automatic switching from turning into flicker:
 
 Everything that is not the foreground session is second-plane: a slim rail of
 chips showing state, queue rank and age.
+
+## Starting a session
+
+The fleet starts empty. `+ session` asks for a working directory (any directory
+on disk), a name, an optional initial prompt and a model, then
+`src/main/fleet.ts` does the same thing at runtime that it does at boot:
+
+```
+validate cwd → mint uuid → write settings → tmux new-window → register → focus
+```
+
+Each step undoes the previous one on failure, so a refused creation leaves no
+tmux window, no settings file and no row. The initial prompt travels as
+`claude`'s positional argument, not as replayed keystrokes.
+
+The new session takes the foreground immediately, through the manual-pick path:
+the human just asked for it, so no incoming claim preempts it.
+
+The initial prompt is also summarised out of band — a detached `claude -p` with
+every tool denied — into the one-line tooltip carried by the session chip. It
+never delays the session, and it never receives the fleet's `--settings`: that
+file would make it POST hook events under the session's identity.
+
+### Liveness comes from the pane, not from a hook
+
+`SessionStart` never fires — verified against Claude Code 2.1.236, with the
+hook declared both through `--settings` and through a project
+`.claude/settings.json`. `UserPromptSubmit`, `Stop` and `SessionEnd` all
+arrive. So the first hook of a session only lands once the human says
+something, which is far too late to tell a live session from a dead one.
+
+The pane itself is the signal, and the bridge already streams it:
+
+- **first bytes drawn** — the process is up. With no initial prompt it becomes
+  `idle` (it is waiting for its first instruction); with one, `running`.
+- **`SESSION_END_MARKER` in the pane** — the wrapper prints it when Claude Code
+  exits. Before the session ever drew anything that is a failed launch
+  (`failed`); afterwards it is a normal end (`gone`). It is checked before the
+  liveness signal, because a launch that fails prints its error and the marker
+  in the same breath.
+- **`BOOT_TIMEOUT_MS` (15 s)** — backstop only, for a launch that draws nothing
+  at all and never exits.
+
+A `failed` session has its window and its settings file taken down.
+
+This is also what makes the workspace trust dialog survivable: an unapproved
+directory makes Claude Code stop on a prompt without POSTing anything. The pane
+draws it, the session goes `idle` with the dialog on screen, and the human
+answers it — instead of being killed by a timer.
 
 ## How a Claude session joins a tmux pane
 
@@ -104,12 +153,13 @@ make clean     # kill the POC tmux server, drop run artifacts and dist/
 │   │   └── protocol.ts        attention classes, hook payloads, tmux/contextBridge/SQLite shapes
 │   ├── main/
 │   │   ├── index.ts           Electron main: wires bridge, hooks, arbiter, IPC
+│   │   ├── fleet.ts           session factory: validate, launch, roll back, summarise
 │   │   ├── arbiter.ts         attention classes, focus policy, guards
 │   │   ├── tmux.ts            control mode bridge, octal decoder, send-keys
 │   │   ├── hooks-server.ts    loopback hook endpoint, identity from the URL
 │   │   ├── session-settings.ts  per-session `--settings` file generator
 │   │   ├── db.ts              SQLite schema and queries
-│   │   └── config.ts          sessions, paths, tmux socket, hook events
+│   │   └── config.ts          paths, tmux socket, hook events, fleet limits
 │   ├── preload.ts             contextBridge: state, output, input, focus, pin
 │   └── renderer/              topbar, full-bleed terminal, second-plane rail
 ├── test/
@@ -118,11 +168,18 @@ make clean     # kill the POC tmux server, drop run artifacts and dist/
 │   └── smoke-e2e.ts           full stack without Electron
 ├── dist/                      generated: esbuild output, gitignored
 ├── run/                      generated: settings files, fleet.db
-└── workspaces/{alpha,beta}/  working directory of each Claude session
+└── workspaces/               leftover POC sandboxes, no longer wired in
 ```
 
 SQLite (`run/fleet.db`) holds the session registry, the current claims and an
 append-only `hook_events` log. Electron owns the tmux lifecycle: every launch
 starts from a clean fleet, the event log survives.
 
-Sessions and working directories are declared in `src/main/config.ts`.
+`src/main/config.ts` no longer declares the sessions themselves — `SESSIONS` is
+an optional seed, empty by default. It holds the fleet's limits instead:
+`MAX_SESSIONS`, `BOOT_TIMEOUT_MS`, `SESSION_END_MARKER`, the models offered at
+creation and the summary settings.
+
+Bringing dynamically created sessions back across restarts is tracked in
+issue #7; the `model`, `prompt` and `summary` columns are already persisted for
+it.
