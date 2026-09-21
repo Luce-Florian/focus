@@ -50,6 +50,36 @@ every tool denied — into the one-line tooltip carried by the session chip. It
 never delays the session, and it never receives the fleet's `--settings`: that
 file would make it POST hook events under the session's identity.
 
+## Restarting: the fleet comes back
+
+Closing Focus kills the tmux server and, with it, every `claude` process. The
+sessions that were alive at that moment are not lost: at the next boot the
+fleet reads what survived in SQLite and relaunches each one with
+`claude --resume <uuid>`, which reuses the original session id — verified, that
+is what makes the hooks rejoin by URL routing alone, with no handshake.
+
+```
+purge gone/failed rows → list restorable sessions → resume each in a fresh pane
+```
+
+The rules keep the restore boring:
+
+- **alive means restorable** — `running`, `idle`, `waiting_perm`,
+  `waiting_input` come back; `gone` and `failed` rows are purged, and their
+  settings files with them;
+- **the settings file is rewritten** — the hook port and token change at every
+  boot, so the old file's URLs would point at a dead endpoint;
+- **no prompt replay** — the conversation resumes where it stopped, the session
+  comes up `idle` ("reprise"), never `running`; its tooltip survives without a
+  new summary pass;
+- **a restore that cannot happen is skipped, not fatal** — a deleted directory,
+  a retired model or a full fleet logs one line and the rest of the fleet still
+  comes up. A resume that fails in the pane is caught by the ordinary
+  marker → `failed` → discard pipeline.
+
+The first restored session takes the foreground through the ordinary
+`première session` path; the arbiter then re-evaluates as hooks arrive.
+
 ### Liveness comes from the pane, not from a hook
 
 `SessionStart` never fires — verified against Claude Code 2.1.236, with the
@@ -228,13 +258,10 @@ checkout, both handled in `src/main/index.ts`:
 
 SQLite (`run/fleet.db`) holds the session registry, the current claims and an
 append-only `hook_events` log. Electron owns the tmux lifecycle: every launch
-starts from a clean fleet, the event log survives.
+relaunches the sessions that were alive at the previous shutdown, the event log
+survives.
 
 `src/main/config.ts` no longer declares the sessions themselves — `SESSIONS` is
 an optional seed, empty by default. It holds the fleet's limits instead:
 `MAX_SESSIONS`, `BOOT_TIMEOUT_MS`, `SESSION_END_MARKER`, the models offered at
 creation and the summary settings.
-
-Bringing dynamically created sessions back across restarts is tracked in
-issue #7; the `model`, `prompt` and `summary` columns are already persisted for
-it.

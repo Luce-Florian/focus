@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
@@ -116,8 +116,34 @@ async function bootFleet(): Promise<void> {
     claudeBin: resolveClaude()
   });
 
-  // The fleet starts empty unless config.ts seeds it; the human creates the
-  // rest from the interface, on the directories they choose.
+  // `gone` and `failed` sessions are never brought back; the queue is derived
+  // state and is rebuilt from what survives.
+  store.purge();
+
+  // Sessions that were alive at the last shutdown come back on their own:
+  // same uuid, fresh pane, conversation resumed. A restore that cannot happen
+  // (directory gone, model retired, fleet full) is skipped with a log, not a
+  // crash — the rest of the fleet still deserves to come up.
+  for (const row of store.listRestorable()) {
+    try {
+      const s = await fleet.restoreSession(row);
+      console.log(`[fleet] restored ${s.label} uuid=${s.uuid} pane=${s.paneId} window=${s.windowId}`);
+    } catch (err: unknown) {
+      console.error(`[fleet] restore ${row.label} failed:`, err instanceof Error ? err.message : err);
+      store.deleteSession(row.uuid);
+    }
+  }
+
+  // Settings files whose session is gone — purged rows, restores that rolled
+  // back — outlive nothing: hook URLs in them point at a dead port anyway.
+  const alive = new Set(arbiter.live().map((s) => s.uuid));
+  for (const f of readdirSync(runDir)) {
+    const m = /^([0-9a-f-]{36})\.settings\.json$/.exec(f);
+    if (m?.[1] && !alive.has(m[1])) rmSync(path.join(runDir, f), { force: true });
+  }
+
+  // The fleet can also be seeded from config.ts; the human creates the rest
+  // from the interface, on the directories they choose.
   for (const spec of cfg.SESSIONS) {
     try {
       const s = await fleet.createSession(spec);
@@ -149,7 +175,7 @@ void app.whenReady().then(async () => {
 });
 
 ipcMain.handle('fleet:ready', (): FleetSnapshot =>
-  arbiter ? arbiter.snapshot() : { sessions: [], focused: null, pinned: false, lastSwitch: null }
+  arbiter ? arbiter.snapshot() : { sessions: [], focused: null, lastSwitch: null }
 );
 ipcMain.handle('fleet:models', (): readonly ModelOption[] => cfg.MODELS);
 
@@ -182,7 +208,6 @@ ipcMain.on('pane:input', (_e, paneId: string, data: string) => {
     console.error('[tmux] send-keys', err instanceof Error ? err.message : err);
   });
 });
-ipcMain.on('fleet:pin', (_e, pinned: boolean) => arbiter?.setPinned(pinned));
 ipcMain.on('fleet:focus', (_e, uuid: string) => arbiter?.focus(uuid));
 ipcMain.on('fleet:leave', () => arbiter?.leave());
 ipcMain.on('fleet:resize', (_e, cols: number, rows: number) => {

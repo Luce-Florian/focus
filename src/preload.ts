@@ -13,7 +13,6 @@ const fleet = {
   input: (paneId, data) => { ipcRenderer.send('pane:input', paneId, data); },
   focus: (uuid) => { ipcRenderer.send('fleet:focus', uuid); },
   leave: () => { ipcRenderer.send('fleet:leave'); },
-  pin: (pinned) => { ipcRenderer.send('fleet:pin', pinned); },
   resize: (cols, rows) => { ipcRenderer.send('fleet:resize', cols, rows); }
 } satisfies FleetBridge;
 

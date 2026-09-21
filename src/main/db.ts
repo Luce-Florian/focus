@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import type { HookPayload, QueueRow, SessionState, HookEventRow } from '../shared/protocol.ts';
+import { STATES, type HookPayload, type QueueRow, type SessionRow, type SessionState, type HookEventRow } from '../shared/protocol.ts';
 
 export interface NewSession {
   readonly uuid: string;
@@ -32,6 +32,10 @@ export interface Store extends ArbiterStore {
   readonly db: DatabaseSync;
   readQueue(): QueueRow[];
   recentEvents(limit: number): HookEventRow[];
+  /** Sessions still alive at the last shutdown, oldest first. */
+  listRestorable(): SessionRow[];
+  /** Boot-time cleanup: drop `gone`/`failed` rows and stale queue entries. */
+  purge(): void;
   close(): void;
 }
 
@@ -88,19 +92,30 @@ export function open(dbPath: string): Store {
   `);
   migrateSessions(db);
 
-  // Electron owns the tmux lifecycle in this skeleton: every launch starts from
-  // a clean fleet. The append-only event log survives across runs. Bringing
-  // dynamically created sessions back is tracked in issue #7; the model,
-  // prompt and summary columns are already persisted for it.
-  db.exec('DELETE FROM sessions; DELETE FROM queue;');
-
   return {
     db,
+    purge() {
+      // `gone` and `failed` sessions are never brought back: the restore pass
+      // reads what is left. The queue is derived state, so it is rebuilt from
+      // the surviving rows' claims.
+      db.prepare('DELETE FROM sessions WHERE state IN (?, ?)').run(STATES.GONE, STATES.FAILED);
+      db.prepare('DELETE FROM queue WHERE uuid NOT IN (SELECT uuid FROM sessions)').run();
+    },
     insertSession(s) {
+      // Upsert, not insert: a restored session already has its row, and its
+      // `created_at` is what orders the next restore pass — it must survive.
       db.prepare(
         `INSERT INTO sessions
            (uuid, label, cwd, pane_id, window_id, state, model, prompt, summary, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(uuid) DO UPDATE SET
+           pane_id = excluded.pane_id,
+           window_id = excluded.window_id,
+           state = excluded.state,
+           model = excluded.model,
+           prompt = excluded.prompt,
+           summary = excluded.summary,
+           updated_at = excluded.updated_at`
       ).run(
         s.uuid,
         s.label,
@@ -144,6 +159,13 @@ export function open(dbPath: string): Store {
     },
     recentEvents(limit) {
       return db.prepare('SELECT * FROM hook_events ORDER BY id DESC LIMIT ?').all(limit) as unknown as HookEventRow[];
+    },
+    listRestorable() {
+      // `created_at ASC`: restoration replays creation order, so the focus
+      // "première session" lands on the oldest, as it did at first boot.
+      return db
+        .prepare('SELECT * FROM sessions ORDER BY created_at ASC')
+        .all() as unknown as SessionRow[];
     },
     close() {
       db.close();

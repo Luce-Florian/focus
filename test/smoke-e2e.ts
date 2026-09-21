@@ -48,10 +48,11 @@ function writeFakeClaude(dir: string, base: string): string {
   fs.writeFileSync(
     file,
     `#!/bin/sh
-uuid=""; model=""; settings=""; prompt=""
+uuid=""; model=""; settings=""; prompt=""; resumed=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --session-id) uuid="$2"; shift 2 ;;
+    --resume)     uuid="$2"; resumed=1; shift 2 ;;
     --settings)   settings="$2"; shift 2 ;;
     --model)      model="$2"; shift 2 ;;
     *)            prompt="$1"; shift ;;
@@ -73,6 +74,7 @@ esac
 
 echo "UUID=$uuid MODEL=$model PROMPT=$prompt"
 [ -f "$settings" ] && echo "SETTINGS-OK"
+[ "$resumed" = 1 ] && echo "RESUME-BANNER"
 
 case "$prompt" in
   scenario-alpha)
@@ -323,11 +325,92 @@ async function main(): Promise<void> {
     assert.ok(arbiter.get(alpha.uuid)?.paneId.startsWith('%'));
   });
 
-  console.log('\n' + checks.join('\n') + '\n');
+  // ---- restart: what was alive comes back ----
 
+  // Counted before the restart: the restore path never re-summarises.
+  const summarisedBefore = summarised.length;
   await bridge.kill();
   hooks.server.close();
   store.close();
+
+  const store2 = open(path.join(tmpdir, 'fleet.db'));
+  store2.purge();
+  const arbiter2 = new Arbiter({ store: store2, options: { bootTimeoutMs: BOOT_TIMEOUT_MS } });
+  const hooks2 = await startHooksServer({
+    host: HOST,
+    onEvent: (e) => {
+      arbiter2.handleHook(e);
+    }
+  });
+  const bridge2 = new TmuxBridge({ socket: SOCKET, session: SESSION });
+  await bridge2.createServer();
+  bridge2.attach();
+  const fleet2 = createFleet({
+    cfg,
+    bridge: bridge2,
+    arbiter: arbiter2,
+    hooks: hooks2,
+    claudeBin: writeFakeClaude(tmpdir, `http://${HOST}:${hooks2.port}/h/${hooks2.token}`)
+  });
+  const output2 = new Map<string, string>();
+  bridge2.on('output', (paneId, bytes) => {
+    output2.set(paneId, (output2.get(paneId) ?? '') + bytes.toString('utf8'));
+    fleet2.observeOutput(paneId, bytes);
+  });
+  bridge2.on('window-closed', (w) => {
+    const s = arbiter2.byWindow(w);
+    if (s) arbiter2.markGone(s.uuid);
+  });
+
+  check('only the sessions alive at shutdown are restorable', () => {
+    // alpha went idle after its turn; beta ended and was purged.
+    assert.deepEqual(
+      store2.listRestorable().map((r) => r.uuid),
+      [alpha.uuid]
+    );
+  });
+
+  const [restorable] = store2.listRestorable();
+  assert.ok(restorable, 'alpha survived the purge');
+  const restored = await fleet2.restoreSession(restorable);
+
+  check('a restored session keeps its uuid and takes the floor on its own', () => {
+    assert.equal(restored.uuid, alpha.uuid);
+    assert.equal(arbiter2.focused, alpha.uuid, 'première session, no manual pick armed');
+  });
+
+  await sleep(1200);
+  check('the resumed conversation comes up idle, not working', () => {
+    const s = arbiter2.get(alpha.uuid);
+    assert.equal(s?.state, 'idle', 'it waits for its next instruction');
+    assert.equal(s?.reason, 'reprise');
+    assert.equal(arbiter2.live().length, 1);
+  });
+
+  check('the resume command line reached the binary intact', () => {
+    // The stub only prints RESUME-BANNER when it saw --resume with the uuid.
+    const all = [...output2.values()].join('');
+    assert.match(all, /RESUME-BANNER/);
+    assert.match(all, new RegExp(`UUID=${alpha.uuid} MODEL=sonnet PROMPT=\\s`), 'resumed, no prompt replay');
+  });
+
+  check('the restored settings file points at this boot\'s hook port', () => {
+    const settings = fs.readFileSync(path.join(tmpdir, `${alpha.uuid}.settings.json`), 'utf8');
+    assert.ok(settings.includes(`:${hooks2.port}/`), `hook URL rebuilt for port ${hooks2.port}`);
+  });
+
+  check('the restored session keeps its tooltip without re-summarising', () => {
+    assert.equal(summarised.length, summarisedBefore, 'no summary pass on the restore path');
+    const s = arbiter2.snapshot().sessions.find((x) => x.uuid === alpha.uuid);
+    assert.equal(s?.summary, 'RÉSUMÉ scenario-alpha', 'the summary survived the restart');
+    assert.equal(s?.model, 'sonnet');
+  });
+
+  console.log('\n' + checks.join('\n') + '\n');
+
+  await bridge2.kill();
+  hooks2.server.close();
+  store2.close();
   fs.rmSync(tmpdir, { recursive: true, force: true });
   console.log(process.exitCode ? 'SMOKE FAILED' : 'SMOKE PASSED');
 }

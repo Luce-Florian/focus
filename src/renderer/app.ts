@@ -22,7 +22,6 @@ const reasonEl = required('reason');
 const dotEl = required('dot');
 const emptyEl = required('empty');
 const toastEl = required('toast');
-const pinBtn = required('pin');
 const leaveBtn = required('leave');
 const newBtn = required('new');
 
@@ -43,7 +42,7 @@ interface TermEntry {
 }
 
 const terms = new Map<string, TermEntry>(); // paneId -> { term, el }
-let state: FleetSnapshot = { sessions: [], focused: null, pinned: false, lastSwitch: null };
+let state: FleetSnapshot = { sessions: [], focused: null, lastSwitch: null };
 let geometry = { cols: 100, rows: 30 };
 let shownPane: string | null = null;
 let lastSwitchAt = 0;
@@ -120,8 +119,6 @@ function render(): void {
   titleEl.title = focused ? tooltip(focused) : '';
   reasonEl.textContent = focused ? `${focused.clsLabel} · ${focused.reason}` : '';
   dotEl.className = `dot ${focused ? focused.state : ''}`;
-  pinBtn.classList.toggle('on', state.pinned);
-  pinBtn.textContent = state.pinned ? 'épinglé' : 'épingler';
 
   const others = state.sessions.filter((s) => s.uuid !== state.focused);
   rail.replaceChildren(...others.map(chipFor));
@@ -257,7 +254,6 @@ form.onsubmit = (e) => {
 
 newBtn.onclick = () => { void openCreate(); };
 window.fleet.onNotice(toast);
-pinBtn.onclick = () => { window.fleet.pin(!state.pinned); };
 leaveBtn.onclick = () => { window.fleet.leave(); };
 window.addEventListener('resize', applyGeometry);
 setInterval(render, 1000); // keeps the rail's elapsed times honest
