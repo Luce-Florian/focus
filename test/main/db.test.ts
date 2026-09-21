@@ -67,22 +67,46 @@ void test('hook events append to the log and come back most-recent first', () =>
   });
 });
 
-void test('every launch starts from a clean fleet: sessions and the queue do not survive a restart', () => {
+void test('a restart keeps the sessions that were alive and purges the rest', () => {
   withTempDir((dir) => {
     const dbPath = path.join(dir, 'fleet.db');
     const first = open(dbPath);
-    first.insertSession(newSession());
+    first.insertSession(newSession({ state: 'running' }));
+    first.insertSession(newSession({ uuid: 'b', label: 'beta', cwd: '/b', paneId: '%2', windowId: '@2', state: 'idle', createdAt: 2000 }));
+    first.insertSession(newSession({ uuid: 'c', label: 'gamma', cwd: '/c', paneId: '%3', windowId: '@3', state: 'gone', createdAt: 3000 }));
+    first.insertSession(newSession({ uuid: 'd', label: 'delta', cwd: '/d', paneId: '%4', windowId: '@4', state: 'failed', createdAt: 4000 }));
     first.upsertQueue('a', 3, 'permission', 1000);
+    first.upsertQueue('c', 2, 'attente', 1000); // c is gone: its queue claim dies with it
     first.close();
 
     const restarted = open(dbPath);
     try {
-      assert.equal(restarted.db.prepare('SELECT * FROM sessions WHERE uuid = ?').get('a'), undefined);
-      assert.deepEqual(restarted.readQueue(), []);
+      restarted.purge();
+      assert.deepEqual(
+        restarted.listRestorable().map((r) => r.uuid),
+        ['a', 'b']
+      );
+      assert.equal(restarted.db.prepare('SELECT * FROM sessions WHERE uuid = ?').get('c'), undefined);
+      assert.equal(restarted.db.prepare('SELECT * FROM sessions WHERE uuid = ?').get('d'), undefined);
+      assert.deepEqual(restarted.readQueue().map((r) => r.uuid), ['a']);
     } finally {
       restarted.close();
     }
   }, 'fleet-db-');
+});
+
+void test('re-registering a restored session refreshes its pane and window but not its creation time', () => {
+  withStore((store) => {
+    store.insertSession(newSession({ state: 'idle' }));
+    store.insertSession(newSession({ paneId: '%9', windowId: '@9', state: 'booting', summary: 'Migration du schéma' }));
+    const row = store.db.prepare('SELECT * FROM sessions WHERE uuid = ?').get('a');
+    assert.ok(row);
+    assert.equal(row.pane_id, '%9');
+    assert.equal(row.window_id, '@9');
+    assert.equal(row.summary, 'Migration du schéma');
+    // The original creation time orders the next restore pass: it must survive.
+    assert.equal(row.created_at, 1000);
+  });
 });
 
 void test('a session created from the interface keeps its model, prompt and summary', () => {

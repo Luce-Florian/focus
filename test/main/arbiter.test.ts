@@ -140,15 +140,15 @@ void test('dwell keeps two back-to-back claims from flickering', () => {
   assert.equal(ctx.arbiter.focused, 'c');
 });
 
-void test('pin suspends automatic switching and releasing it catches up', () => {
-  const ctx = build();
+void test('no guard outlives its expiry: the deferred claim always lands', () => {
+  const ctx = build({ manualStickyMs: 10000, typingGraceMs: 2500, dwellMs: 1200 });
   settle(ctx);
-  ctx.arbiter.setPinned(true);
+  ctx.arbiter.focus('c'); // arms the manual sticky
+  ctx.arbiter.noteInput('c'); // arms the typing grace
   ctx.arbiter.handleHook(hook('b', 'Notification', PERM));
-  assert.equal(ctx.arbiter.focused, 'a');
-  ctx.advance(5000);
-  ctx.arbiter.setPinned(false);
-  assert.equal(ctx.arbiter.focused, 'b');
+  assert.equal(ctx.arbiter.focused, 'c', 'guards defer the move');
+  ctx.advance(10000);
+  assert.equal(ctx.arbiter.focused, 'b', 'every guard expired, nothing holds the view forever');
 });
 
 void test('a manual pick is protected for its sticky window', () => {
@@ -189,9 +189,9 @@ void test('leave with nothing claiming attention focuses nothing', () => {
 });
 
 void test('queue is ordered by class then by age of the claim', () => {
-  const ctx = build();
+  const ctx = build({ manualStickyMs: 60000 });
   settle(ctx);
-  ctx.arbiter.setPinned(true);
+  ctx.arbiter.focus('a'); // hold the view so the queue, not the focus, is under test
   ctx.arbiter.handleHook(hook('b', 'Notification', IDLE));
   ctx.advance(10);
   ctx.arbiter.handleHook(hook('c', 'Notification', IDLE));
@@ -203,7 +203,6 @@ void test('queue is ordered by class then by age of the claim', () => {
 void test('SessionEnd clears the claim of a background session', () => {
   const ctx = build();
   settle(ctx);
-  ctx.arbiter.setPinned(true);
   ctx.arbiter.handleHook(hook('b', 'Notification', PERM));
   ctx.arbiter.handleHook(hook('b', 'SessionEnd'));
   assert.equal(ctx.arbiter.queue().length, 0);
@@ -233,6 +232,29 @@ void test('a session launched with a prompt comes up working, not idle', () => {
   ctx.arbiter.register({ uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1', prompt: 'go' });
   ctx.arbiter.noteAlive('a');
   assert.equal(ctx.arbiter.sessions.get('a')?.state, STATES.RUNNING);
+});
+
+void test('a resumed session comes up idle, whatever its original prompt', () => {
+  const ctx = harness();
+  ctx.arbiter.register({
+    uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1',
+    prompt: 'migrate the billing schema', resumed: true
+  });
+  ctx.arbiter.noteAlive('a');
+  const s = ctx.arbiter.sessions.get('a');
+  assert.equal(s?.state, STATES.IDLE, 'a resumed conversation waits for its next instruction');
+  assert.equal(s?.reason, 'reprise');
+});
+
+void test('a restored session keeps its summary without re-summarising its prompt', () => {
+  const ctx = harness();
+  ctx.arbiter.register({
+    uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1',
+    prompt: 'migrate the billing schema', summary: 'Migration du schéma de facturation', resumed: true
+  });
+  const s = ctx.arbiter.snapshot().sessions[0];
+  assert.ok(s);
+  assert.equal(s.summary, 'Migration du schéma de facturation');
 });
 
 void test('later output never drags a session back to its boot state', () => {

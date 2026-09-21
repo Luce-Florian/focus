@@ -178,7 +178,6 @@ export interface SessionSnapshot {
 /** `Arbiter#snapshot()`: the whole fleet, pushed to the renderer over `fleet:state`. */
 export interface FleetSnapshot {
   focused: string | null;
-  pinned: boolean;
   lastSwitch: SwitchInfo | null;
   sessions: SessionSnapshot[];
 }
@@ -219,6 +218,5 @@ export interface FleetBridge {
   input(paneId: string, data: string): void;
   focus(uuid: string): void;
   leave(): void;
-  pin(pinned: boolean): void;
   resize(cols: number, rows: number): void;
 }

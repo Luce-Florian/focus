@@ -47,8 +47,19 @@ export interface CreatedSession {
   readonly settingsFile: string;
 }
 
+/** What the restore pass hands back to a session that survived a restart. */
+export interface RestorableSession {
+  readonly uuid: string;
+  readonly label: string;
+  readonly cwd: string;
+  readonly model: string | null;
+  readonly prompt: string | null;
+  readonly summary: string | null;
+}
+
 export interface Fleet {
   createSession(spec: CreateSessionSpec): Promise<CreatedSession>;
+  restoreSession(row: RestorableSession): Promise<CreatedSession>;
   discard(uuid: string): Promise<void>;
   observeOutput(paneId: string, bytes: Buffer): void;
   liveCount(): number;
@@ -121,14 +132,19 @@ export function createFleet({
   }
 
   /**
-   * Every step undoes the previous one on failure: no orphan tmux window, no
-   * orphan settings file, no orphan row.
+   * Settings file plus tmux window for one session, the uuid already minted.
+   * The `--settings` flag sits after the options and before the positional
+   * prompt, exactly where `claude [options] [prompt]` reads them. On failure
+   * the settings file is removed: no orphan file, no orphan window.
    */
-  async function createSession(spec: CreateSessionSpec): Promise<CreatedSession> {
-    const { cwd, label, model } = validate(spec);
-    const prompt = (spec.prompt ?? '').trim();
-    const uuid = crypto.randomUUID();
-
+  async function openWindow(opts: {
+    uuid: string;
+    label: string;
+    cwd: string;
+    options: string[]; // already shQuote'd
+    positional: string | null; // already shQuote'd
+  }): Promise<{ settingsFile: string; windowId: string; paneId: string }> {
+    const { uuid, label, cwd, options, positional } = opts;
     const settingsFile = writeSessionSettings({
       runDir: cfg.RUN_DIR,
       uuid,
@@ -138,28 +154,45 @@ export function createFleet({
       events: cfg.HOOK_EVENTS
     });
 
-    const argv = [shQuote(claudeBin), '--session-id', uuid, '--settings', shQuote(settingsFile)];
-    if (model) argv.push('--model', shQuote(model));
-    // `claude [options] [prompt]`: the initial prompt is a positional argument,
-    // so the session starts on it with no keystroke replay.
-    if (prompt) argv.push(shQuote(prompt));
+    const argv = [shQuote(claudeBin), ...options, '--settings', shQuote(settingsFile)];
+    if (positional) argv.push(positional);
 
     // The pane outlives Claude Code so the final screen stays readable; the
     // marker is what tells the fleet the process is gone.
     const command = `${argv.join(' ')}; printf '\\n%s\\n' ${shQuote(cfg.SESSION_END_MARKER)}; exec sleep 86400`;
 
-    let windowId: string;
-    let paneId: string;
     try {
-      ({ windowId, paneId } = await bridge.newSessionWindow({
+      const { windowId, paneId } = await bridge.newSessionWindow({
         label,
         cwd,
         command: `sh -c ${shQuote(command)}`
-      }));
+      });
+      return { settingsFile, windowId, paneId };
     } catch (err: unknown) {
       rmSync(settingsFile, { force: true });
       throw new FleetError('ETMUX', `tmux a refusé la fenêtre : ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * Every step undoes the previous one on failure: no orphan tmux window, no
+   * orphan settings file, no orphan row.
+   */
+  async function createSession(spec: CreateSessionSpec): Promise<CreatedSession> {
+    const { cwd, label, model } = validate(spec);
+    const prompt = (spec.prompt ?? '').trim();
+    const uuid = crypto.randomUUID();
+
+    const options = model ? ['--session-id', shQuote(uuid), '--model', shQuote(model)] : ['--session-id', shQuote(uuid)];
+    // `claude [options] [prompt]`: the initial prompt is a positional argument,
+    // so the session starts on it with no keystroke replay.
+    const { settingsFile, windowId, paneId } = await openWindow({
+      uuid,
+      label,
+      cwd,
+      options,
+      positional: prompt ? shQuote(prompt) : null
+    });
 
     try {
       arbiter.register({ uuid, label, cwd, paneId, windowId, model: model || null, prompt: prompt || null });
@@ -183,6 +216,50 @@ export function createFleet({
     }
 
     return { uuid, label, cwd, paneId, windowId, model: model || null, prompt: prompt || null, settingsFile };
+  }
+
+  /**
+   * Bring a session that survived a restart back to the foreground fleet:
+   * same uuid, fresh pane, conversation resumed where it stopped. The hook
+   * identity carries over untouched — `claude --resume` reuses the original
+   * session id — so the join is still URL routing, never discovered.
+   */
+  async function restoreSession(row: RestorableSession): Promise<CreatedSession> {
+    const { cwd, label, model } = validate({ cwd: row.cwd, label: row.label, model: row.model ?? '' });
+
+    const options = model
+      ? ['--resume', shQuote(row.uuid), '--model', shQuote(model)]
+      : ['--resume', shQuote(row.uuid)];
+    const { settingsFile, windowId, paneId } = await openWindow({
+      uuid: row.uuid,
+      label,
+      cwd,
+      options,
+      positional: null
+    });
+
+    try {
+      arbiter.register({
+        uuid: row.uuid,
+        label,
+        cwd,
+        paneId,
+        windowId,
+        model: model || null,
+        prompt: row.prompt,
+        summary: row.summary,
+        resumed: true
+      });
+    } catch (err: unknown) {
+      await bridge.cli(['kill-window', '-t', windowId]).catch(() => undefined);
+      rmSync(settingsFile, { force: true });
+      throw err;
+    }
+
+    // No manual pick here: the first restored session takes the floor through
+    // the ordinary `première session` path, and the arbiter re-evaluates as
+    // hooks arrive.
+    return { uuid: row.uuid, label, cwd, paneId, windowId, model: model || null, prompt: row.prompt, settingsFile };
   }
 
   /**
@@ -217,7 +294,7 @@ export function createFleet({
     rmSync(path.join(cfg.RUN_DIR, `${uuid}.settings.json`), { force: true });
   }
 
-  return { createSession, discard, observeOutput, liveCount };
+  return { createSession, restoreSession, discard, observeOutput, liveCount };
 }
 
 const SUMMARY_INSTRUCTION =

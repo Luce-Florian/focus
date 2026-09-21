@@ -53,6 +53,11 @@ export interface RegisterSession {
   readonly windowId: string;
   readonly model?: string | null;
   readonly prompt?: string | null;
+  // Restore path: the tooltip survives the restart, no need to re-summarise.
+  readonly summary?: string | null;
+  // A resumed session waits for its next instruction: it is not working, no
+  // matter that it was created with an initial prompt.
+  readonly resumed?: boolean;
 }
 
 export interface SessionRecord {
@@ -64,6 +69,8 @@ export interface SessionRecord {
   model: string | null;
   prompt: string | null;
   summary: string | null;
+  // Not persisted: only meaningful between `register` and the first pane draw.
+  resumed: boolean;
   state: SessionState;
   reason: string;
   since: number;
@@ -100,13 +107,12 @@ interface ArbiterEvents {
  *
  *   - a session the human is being asked something by is never preempted by an
  *     equal claim (ties keep the incumbent);
- *   - recent typing, a recent switch, a manual pick or a pin all defer the move
+ *   - recent typing, a recent switch or a manual pick all defer the move
  *     rather than cancel it; the decision is replayed when the guard expires.
  */
 export class Arbiter extends EventEmitter<ArbiterEvents> {
   readonly sessions = new Map<string, SessionRecord>();
   focused: string | null = null;
-  pinned = false;
   lastSwitch: SwitchInfo | null = null;
 
   private readonly store: ArbiterStore;
@@ -137,7 +143,8 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
       windowId: session.windowId,
       model: session.model ?? null,
       prompt: session.prompt ?? null,
-      summary: null,
+      summary: session.summary ?? null,
+      resumed: session.resumed ?? false,
       state: STATES.BOOTING,
       reason: 'démarrage',
       since: ts,
@@ -186,14 +193,15 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
    * First bytes drawn by the pane. `SessionStart` is not observed to fire
    * (Claude Code 2.1.236, HTTP hooks), so the pane rendering at all is the
    * only proof the process came up. A session launched with a prompt is
-   * already working; one launched without waits for its first instruction.
+   * already working; one launched without waits for its first instruction —
+   * and so does a resumed one, whatever its original prompt was.
    */
   noteAlive(uuid: string): void {
     const s = this.sessions.get(uuid);
     if (s?.state !== STATES.BOOTING) return;
     const ts = this.now();
-    if (s.prompt) this._setState(s, STATES.RUNNING, 'travaille', ts);
-    else this._setState(s, STATES.IDLE, 'prête', ts);
+    if (s.prompt && !s.resumed) this._setState(s, STATES.RUNNING, 'travaille', ts);
+    else this._setState(s, STATES.IDLE, s.resumed ? 'reprise' : 'prête', ts);
     this.evaluate();
     this.emit('change');
   }
@@ -312,16 +320,8 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     this.emit('change');
   }
 
-  /** Hard lock: automatic switching is suspended until unpinned. */
-  setPinned(pinned: boolean): void {
-    this.pinned = pinned;
-    if (!this.pinned) this.evaluate();
-    this.emit('change');
-  }
-
   /** Explicitly drop the current session and hand the floor to the queue. */
   leave(): void {
-    this.pinned = false;
     this.stickyUntil = 0;
     this.lastInputAt = 0;
     const next = this._bestCandidate();
@@ -380,8 +380,6 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     // nothing. An equal claim keeps the incumbent: no ping-pong.
     const wants = candidateCls > focusedCls || focusedCls <= CLS.RUNNING;
     if (!wants) return;
-
-    if (this.pinned) return;
 
     const defer = Math.max(
       this.stickyUntil - ts,
@@ -448,7 +446,6 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     }));
     return {
       focused: this.focused,
-      pinned: this.pinned,
       lastSwitch: this.lastSwitch,
       sessions
     };
