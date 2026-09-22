@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/Luce-Florian/focus/compare/v1.1.0...v1.2.0) (2026-09-22)
+
+
+### Features
+
+* rank sessions by importance inside a class ([cf3d4f3](https://github.com/Luce-Florian/focus/commit/cf3d4f32db392de40a3e278505cd86f10ea36ba8)), closes [#4](https://github.com/Luce-Florian/focus/issues/4)
+* remove pin feature ([#11](https://github.com/Luce-Florian/focus/issues/11)) ([e350774](https://github.com/Luce-Florian/focus/commit/e350774c8cea1b9315595f1662256d266a485b37))
+
 ## [1.1.0](https://github.com/Luce-Florian/focus/compare/v1.0.0...v1.1.0) (2026-09-17)
 
 
