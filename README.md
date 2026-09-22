@@ -22,7 +22,7 @@ Two invariants keep automatic switching from turning into flicker:
 - **ties keep the incumbent** — a session already asking the human something is
   never preempted by an equal claim;
 - **guards defer, never cancel** — recent typing (2.5 s), a recent switch
-  (1.2 s), a manual pick (10 s) and the pin all postpone the move; a timer
+  (1.2 s) and a manual pick (10 s) all postpone the move; a timer
   replays the decision once the guard expires.
 
 Everything that is not the foreground session is second-plane: a slim rail of
@@ -264,7 +264,7 @@ checkout, both handled in `src/main/index.ts`:
 │   │   ├── session-settings.ts  per-session `--settings` file generator
 │   │   ├── db.ts              SQLite schema and queries
 │   │   └── config.ts          paths, tmux socket, hook events, fleet limits
-│   ├── preload.ts             contextBridge: state, output, input, focus, pin
+│   ├── preload.ts             contextBridge: state, output, input, focus, importance
 │   └── renderer/              topbar, full-bleed terminal, second-plane rail
 ├── test/
 │   ├── main/                  one *.test.ts per src/main module
