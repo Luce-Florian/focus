@@ -4,12 +4,13 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { open, type NewSession } from '../../src/main/db.ts';
+import { IMPORTANCE } from '../../src/shared/protocol.ts';
 import { withTempDir } from '../helpers/tmp.ts';
 
 function newSession(over: Partial<NewSession> = {}): NewSession {
   return {
     uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1', state: 'booting',
-    model: null, prompt: null, summary: null, createdAt: 1000, ...over
+    model: null, prompt: null, summary: null, importance: IMPORTANCE.NORMAL, createdAt: 1000, ...over
   };
 }
 
@@ -121,6 +122,40 @@ void test('a session created from the interface keeps its model, prompt and summ
   });
 });
 
+void test('setImportance persists the level on the row', () => {
+  withStore((store) => {
+    store.insertSession(newSession());
+    store.setImportance('a', IMPORTANCE.HIGH);
+    let row = store.db.prepare('SELECT * FROM sessions WHERE uuid = ?').get('a');
+    assert.ok(row);
+    assert.equal(row.importance, IMPORTANCE.HIGH);
+    store.setImportance('a', IMPORTANCE.LOW);
+    row = store.db.prepare('SELECT * FROM sessions WHERE uuid = ?').get('a');
+    assert.ok(row);
+    assert.equal(row.importance, IMPORTANCE.LOW);
+  });
+});
+
+void test('the importance level survives a restart', () => {
+  withTempDir((dir) => {
+    const dbPath = path.join(dir, 'fleet.db');
+    const first = open(dbPath);
+    first.insertSession(newSession({ state: 'idle', importance: IMPORTANCE.HIGH }));
+    first.setImportance('a', IMPORTANCE.LOW);
+    first.close();
+
+    const restarted = open(dbPath);
+    try {
+      restarted.purge();
+      const [row] = restarted.listRestorable();
+      assert.ok(row);
+      assert.equal(row.importance, IMPORTANCE.LOW, 'the human-assigned level is restorable');
+    } finally {
+      restarted.close();
+    }
+  }, 'fleet-db-');
+});
+
 void test('a discarded session leaves no row behind', () => {
   withStore((store) => {
     store.insertSession(newSession());
@@ -150,6 +185,7 @@ void test('a database written before the model/prompt/summary columns existed is
       assert.ok(row);
       assert.equal(row.model, 'haiku');
       assert.equal(row.summary, null);
+      assert.equal(row.importance, IMPORTANCE.NORMAL, 'the importance column defaults to normal');
     } finally {
       store.close();
     }

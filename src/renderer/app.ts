@@ -1,7 +1,8 @@
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 
-import type { SessionSnapshot, FleetSnapshot } from '../shared/protocol.ts';
+import type { SessionSnapshot, FleetSnapshot, Importance } from '../shared/protocol.ts';
+import { IMPORTANCE, IMPORTANCE_LABEL } from '../shared/protocol.ts';
 
 function required(id: string): HTMLElement {
   const el = document.getElementById(id);
@@ -31,6 +32,7 @@ const cwdInput = requiredAs('cwd', HTMLInputElement);
 const labelInput = requiredAs('label', HTMLInputElement);
 const promptInput = requiredAs('prompt', HTMLTextAreaElement);
 const modelSelect = requiredAs('model', HTMLSelectElement);
+const importanceSelect = requiredAs('importance', HTMLSelectElement);
 const errorEl = required('create-error');
 const browseBtn = required('browse');
 const cancelBtn = required('cancel');
@@ -79,6 +81,16 @@ window.fleet.onOutput((paneId, bytes) => {
 
 const sessionOf = (uuid: string | null): SessionSnapshot | null =>
   state.sessions.find((s) => s.uuid === uuid) ?? null;
+
+/** low → normal → high → low: one click, one step. */
+const nextImportance = (level: Importance): Importance =>
+  level === IMPORTANCE.LOW ? IMPORTANCE.NORMAL : level === IMPORTANCE.NORMAL ? IMPORTANCE.HIGH : IMPORTANCE.LOW;
+
+const IMPORTANCE_MARK: Record<Importance, string> = {
+  [IMPORTANCE.LOW]: '↓',
+  [IMPORTANCE.NORMAL]: '·',
+  [IMPORTANCE.HIGH]: '↑'
+};
 
 function elapsed(ts: number): string {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -146,7 +158,19 @@ function chipFor(s: SessionSnapshot): HTMLDivElement {
 
   const body = document.createElement('span');
   body.append(name, sub);
-  chip.append(dot, body);
+
+  // Cycle button: the click changes the level, it must not focus the chip.
+  const imp = document.createElement('button');
+  imp.type = 'button';
+  imp.className = `imp imp-${s.importanceLabel}`;
+  imp.textContent = IMPORTANCE_MARK[s.importance];
+  imp.title = `importance ${IMPORTANCE_LABEL[s.importance]} — cliquer pour changer`;
+  imp.onclick = (e) => {
+    e.stopPropagation();
+    window.fleet.setImportance(s.uuid, nextImportance(s.importance));
+  };
+
+  chip.append(dot, body, imp);
 
   if (s.rank >= 0) {
     const rank = document.createElement('span');
@@ -238,7 +262,8 @@ form.onsubmit = (e) => {
       cwd: cwdInput.value,
       label: labelInput.value,
       prompt: promptInput.value,
-      model: modelSelect.value
+      model: modelSelect.value,
+      importance: Number.parseInt(importanceSelect.value, 10) as Importance
     })
     .then((r) => {
       if (!r.ok) {

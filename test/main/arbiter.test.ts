@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 
 import { Arbiter } from '../../src/main/arbiter.ts';
-import { STATES } from '../../src/shared/protocol.ts';
+import { IMPORTANCE, STATES } from '../../src/shared/protocol.ts';
 import type { ArbiterStore } from '../../src/main/db.ts';
 import type { HookPayload } from '../../src/shared/protocol.ts';
 
@@ -14,6 +14,7 @@ function fakeStore(): ArbiterStore {
     upsertQueue() {},
     deleteQueue() {},
     setSummary() {},
+    setImportance() {},
     deleteSession() {}
   };
 }
@@ -198,6 +199,84 @@ void test('queue is ordered by class then by age of the claim', () => {
   assert.deepEqual(ctx.arbiter.queue().map((s) => s.uuid), ['b', 'c']);
   ctx.arbiter.handleHook(hook('c', 'Notification', PERM));
   assert.deepEqual(ctx.arbiter.queue().map((s) => s.uuid), ['c', 'b']);
+});
+
+// ---- importance: a tiebreak inside a class, never across ----
+
+void test('queue orders same-class claims by importance before age', () => {
+  const ctx = build({ manualStickyMs: 60000 });
+  settle(ctx);
+  ctx.arbiter.focus('a'); // hold the view so the queue, not the focus, is under test
+  ctx.arbiter.setImportance('c', IMPORTANCE.HIGH);
+  ctx.arbiter.handleHook(hook('b', 'Notification', IDLE));
+  ctx.advance(10);
+  ctx.arbiter.handleHook(hook('c', 'Notification', IDLE));
+  assert.deepEqual(ctx.arbiter.queue().map((s) => s.uuid), ['c', 'b'], 'high outranks an older normal claim');
+  ctx.arbiter.setImportance('b', IMPORTANCE.HIGH);
+  assert.deepEqual(ctx.arbiter.queue().map((s) => s.uuid), ['b', 'c'], 'equal importance falls back to age');
+  ctx.arbiter.setImportance('b', IMPORTANCE.LOW);
+  assert.deepEqual(ctx.arbiter.queue().map((s) => s.uuid), ['c', 'b'], 'low sinks below normal');
+});
+
+void test('a higher-importance equal claim takes the floor from the incumbent', () => {
+  const ctx = build();
+  settle(ctx);
+  ctx.arbiter.handleHook(hook('a', 'Notification', PERM));
+  ctx.advance(5000);
+  ctx.arbiter.handleHook(hook('b', 'Notification', PERM));
+  assert.equal(ctx.arbiter.focused, 'a', 'equal class, equal importance: the incumbent stays');
+  ctx.arbiter.setImportance('b', IMPORTANCE.HIGH);
+  assert.equal(ctx.arbiter.focused, 'b', 'same class, higher importance: the candidate wins');
+});
+
+void test('a lower-importance equal claim never steals the foreground', () => {
+  const ctx = build();
+  settle(ctx);
+  ctx.arbiter.handleHook(hook('a', 'Notification', IDLE));
+  ctx.advance(5000);
+  ctx.arbiter.handleHook(hook('b', 'Notification', IDLE));
+  ctx.arbiter.setImportance('b', IMPORTANCE.LOW);
+  assert.equal(ctx.arbiter.focused, 'a', 'the incumbent is not preempted by a lesser claim');
+  ctx.arbiter.setImportance('a', IMPORTANCE.LOW);
+  assert.equal(ctx.arbiter.focused, 'a', 'equal on every axis: still no ping-pong');
+});
+
+void test('importance never crosses a class boundary', () => {
+  const ctx = build();
+  settle(ctx);
+  ctx.arbiter.setImportance('a', IMPORTANCE.NORMAL);
+  ctx.arbiter.setImportance('b', IMPORTANCE.HIGH);
+  ctx.arbiter.handleHook(hook('a', 'Notification', PERM)); // class 3, normal
+  ctx.advance(5000);
+  ctx.arbiter.handleHook(hook('b', 'Stop')); // class 1, high
+  assert.equal(ctx.arbiter.focused, 'a', 'a blocking permission outweighs a high idle');
+  ctx.arbiter.setImportance('b', IMPORTANCE.HIGH);
+  assert.equal(ctx.arbiter.focused, 'a', 'even a bump changes nothing across the boundary');
+});
+
+void test('recent typing defers the importance switch, the timer then replays it', () => {
+  const ctx = build({ typingGraceMs: 2500, dwellMs: 0 });
+  settle(ctx);
+  ctx.arbiter.handleHook(hook('a', 'Notification', PERM));
+  ctx.advance(5000);
+  ctx.arbiter.handleHook(hook('b', 'Notification', PERM));
+  assert.equal(ctx.arbiter.focused, 'a');
+  ctx.arbiter.noteInput('a');
+  ctx.arbiter.setImportance('b', IMPORTANCE.HIGH);
+  assert.equal(ctx.arbiter.focused, 'a', 'mid-keystroke, stay put');
+  ctx.advance(2500);
+  assert.equal(ctx.arbiter.focused, 'b', 'grace expired, the importance switch fires');
+});
+
+void test('a manual pick is not preempted by a mere importance bump', () => {
+  const ctx = build({ manualStickyMs: 10000 });
+  settle(ctx);
+  ctx.arbiter.handleHook(hook('b', 'Notification', PERM));
+  ctx.arbiter.focus('c');
+  ctx.arbiter.setImportance('b', IMPORTANCE.HIGH);
+  assert.equal(ctx.arbiter.focused, 'c', 'the sticky window holds, importance included');
+  ctx.advance(10000);
+  assert.equal(ctx.arbiter.focused, 'b', 'once it expires, the stronger claim lands');
 });
 
 void test('SessionEnd clears the claim of a background session', () => {

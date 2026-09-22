@@ -65,6 +65,16 @@ body {
   margin-left: auto; font-size: 10px; border-radius: 999px; padding: 1px 6px;
   background: #221a0c; color: #ffc46b;
 }
+.chip .imp {
+  flex: none; width: 18px; height: 18px; margin-left: auto;
+  display: grid; place-items: center; padding: 0;
+  border: 1px solid #262630; border-radius: 50%;
+  background: transparent; color: #5c5c70; font: 600 11px/1 inherit; cursor: pointer;
+}
+.chip .imp:hover { border-color: #3c3c4a; color: #d6d6e0; }
+.chip .imp-basse { color: #4d4d5e; border-color: #1d1d25; }
+.chip .imp-haute { color: #ffc46b; border-color: #6a5320; background: #221a0c; }
+.chip .rank + .imp { margin-left: 0; }
 
 /* ---- creation dialog ---- */
 #create {

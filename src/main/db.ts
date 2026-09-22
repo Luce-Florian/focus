@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { STATES, type HookPayload, type QueueRow, type SessionRow, type SessionState, type HookEventRow } from '../shared/protocol.ts';
+import { STATES, type HookPayload, type Importance, type QueueRow, type SessionRow, type SessionState, type HookEventRow } from '../shared/protocol.ts';
 
 export interface NewSession {
   readonly uuid: string;
@@ -14,6 +14,7 @@ export interface NewSession {
   readonly model: string | null;
   readonly prompt: string | null;
   readonly summary: string | null;
+  readonly importance: Importance;
   readonly createdAt: number;
 }
 
@@ -25,6 +26,7 @@ export interface ArbiterStore {
   upsertQueue(uuid: string, cls: number, reason: string, ts: number): void;
   deleteQueue(uuid: string): void;
   setSummary(uuid: string, summary: string): void;
+  setImportance(uuid: string, importance: Importance): void;
   deleteSession(uuid: string): void;
 }
 
@@ -46,7 +48,8 @@ export interface Store extends ArbiterStore {
 const SESSION_COLUMNS: readonly (readonly [string, string])[] = [
   ['model', 'TEXT'],
   ['prompt', 'TEXT'],
-  ['summary', 'TEXT']
+  ['summary', 'TEXT'],
+  ['importance', 'INTEGER NOT NULL DEFAULT 0']
 ];
 
 function migrateSessions(db: DatabaseSync): void {
@@ -106,8 +109,8 @@ export function open(dbPath: string): Store {
       // `created_at` is what orders the next restore pass — it must survive.
       db.prepare(
         `INSERT INTO sessions
-           (uuid, label, cwd, pane_id, window_id, state, model, prompt, summary, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (uuid, label, cwd, pane_id, window_id, state, model, prompt, summary, importance, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uuid) DO UPDATE SET
            pane_id = excluded.pane_id,
            window_id = excluded.window_id,
@@ -115,6 +118,7 @@ export function open(dbPath: string): Store {
            model = excluded.model,
            prompt = excluded.prompt,
            summary = excluded.summary,
+           importance = excluded.importance,
            updated_at = excluded.updated_at`
       ).run(
         s.uuid,
@@ -126,12 +130,16 @@ export function open(dbPath: string): Store {
         s.model,
         s.prompt,
         s.summary,
+        s.importance,
         s.createdAt,
         s.createdAt
       );
     },
     setSummary(uuid, summary) {
       db.prepare('UPDATE sessions SET summary = ? WHERE uuid = ?').run(summary, uuid);
+    },
+    setImportance(uuid, importance) {
+      db.prepare('UPDATE sessions SET importance = ? WHERE uuid = ?').run(importance, uuid);
     },
     deleteSession(uuid) {
       db.prepare('DELETE FROM sessions WHERE uuid = ?').run(uuid);

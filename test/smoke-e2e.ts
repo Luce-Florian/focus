@@ -21,7 +21,7 @@ import { open } from '../src/main/db.ts';
 import { createFleet, type FleetConfig } from '../src/main/fleet.ts';
 import { startHooksServer } from '../src/main/hooks-server.ts';
 import { TmuxBridge } from '../src/main/tmux.ts';
-import type { HookEventName } from '../src/shared/protocol.ts';
+import { IMPORTANCE, type HookEventName } from '../src/shared/protocol.ts';
 
 const HOST = '127.0.0.1';
 const SOCKET = 'fleet-smoke';
@@ -201,6 +201,7 @@ async function main(): Promise<void> {
     model: 'sonnet'
   });
   const beta = await fleet.createSession({ cwd: workdir, label: 'beta', prompt: 'scenario-beta', model: '' });
+  arbiter.setImportance(alpha.uuid, IMPORTANCE.HIGH);
 
   check('a session created at runtime is registered and takes the floor', () => {
     assert.equal(arbiter.focused, beta.uuid, 'the human just asked for this one');
@@ -385,6 +386,12 @@ async function main(): Promise<void> {
     assert.equal(s?.state, 'idle', 'it waits for its next instruction');
     assert.equal(s?.reason, 'reprise');
     assert.equal(arbiter2.live().length, 1);
+  });
+
+  check('the importance level survives a full restart', () => {
+    assert.equal(arbiter2.get(alpha.uuid)?.importance, IMPORTANCE.HIGH);
+    const s = arbiter2.snapshot().sessions.find((x) => x.uuid === alpha.uuid);
+    assert.equal(s?.importance, IMPORTANCE.HIGH, 'the renderer sees the level too');
   });
 
   check('the resume command line reached the binary intact', () => {

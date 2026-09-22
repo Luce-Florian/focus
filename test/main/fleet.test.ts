@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { createFleet, FleetError, type FleetConfig } from '../../src/main/fleet.ts';
 import { Arbiter } from '../../src/main/arbiter.ts';
+import { IMPORTANCE } from '../../src/shared/protocol.ts';
 import type { ArbiterStore } from '../../src/main/db.ts';
 import type { TmuxBridge } from '../../src/main/tmux.ts';
 import type { HooksServer } from '../../src/main/hooks-server.ts';
@@ -18,6 +19,7 @@ function fakeStore(): ArbiterStore {
     upsertQueue() {},
     deleteQueue() {},
     setSummary() {},
+    setImportance() {},
     deleteSession() {}
   };
 }
@@ -107,11 +109,21 @@ void test('createSession launches with --session-id, the prompt positional and f
   });
 });
 
+void test('createSession defaults to normal importance and accepts an explicit level', async () => {
+  await withFleet(async ({ fleet, arbiter }) => {
+    const plain = await fleet.createSession({ cwd: '/tmp', label: 'alpha' });
+    assert.equal(arbiter.get(plain.uuid)?.importance, IMPORTANCE.NORMAL);
+    const high = await fleet.createSession({ cwd: '/tmp', label: 'beta', importance: IMPORTANCE.HIGH });
+    assert.equal(arbiter.get(high.uuid)?.importance, IMPORTANCE.HIGH);
+  });
+});
+
 void test('restoreSession resumes the same uuid with no prompt replay and no manual pick', async () => {
   await withFleet(async ({ fleet, arbiter, bridge }) => {
     const s = await fleet.restoreSession({
       uuid, label: 'alpha', cwd: '/tmp', model: 'sonnet',
-      prompt: 'migrate the billing schema', summary: 'Migration du schéma de facturation'
+      prompt: 'migrate the billing schema', summary: 'Migration du schéma de facturation',
+      importance: IMPORTANCE.HIGH
     });
     assert.equal(s.uuid, uuid, 'the identity carries over, the pane is fresh');
     const cmd = bridge.commands[0]?.command ?? '';
@@ -120,6 +132,7 @@ void test('restoreSession resumes the same uuid with no prompt replay and no man
     const rec = arbiter.get(uuid);
     assert.equal(rec?.summary, 'Migration du schéma de facturation', 'the tooltip survives');
     assert.equal(rec?.resumed, true);
+    assert.equal(rec?.importance, IMPORTANCE.HIGH, 'the importance level survives');
     assert.equal(arbiter.focused, uuid, 'first restored session takes the floor on its own');
   });
 });
@@ -127,7 +140,7 @@ void test('restoreSession resumes the same uuid with no prompt replay and no man
 void test('a restore whose directory is gone is refused and opens no window', async () => {
   await withFleet(async ({ fleet, bridge, runDir }) => {
     await assert.rejects(
-      fleet.restoreSession({ uuid, label: 'alpha', cwd: '/no/such/dir', model: null, prompt: null, summary: null }),
+      fleet.restoreSession({ uuid, label: 'alpha', cwd: '/no/such/dir', model: null, prompt: null, summary: null, importance: IMPORTANCE.NORMAL }),
       (err: unknown) => err instanceof FleetError && err.code === 'EBADCWD'
     );
     assert.equal(bridge.commands.length, 0);
@@ -139,7 +152,7 @@ void test('a restore refused by tmux leaves no settings file behind', async () =
   await withFleet(async ({ fleet, bridge, runDir }) => {
     bridge.refuse = true;
     await assert.rejects(
-      fleet.restoreSession({ uuid, label: 'alpha', cwd: '/tmp', model: null, prompt: null, summary: null }),
+      fleet.restoreSession({ uuid, label: 'alpha', cwd: '/tmp', model: null, prompt: null, summary: null, importance: IMPORTANCE.NORMAL }),
       (err: unknown) => err instanceof FleetError && err.code === 'ETMUX'
     );
     assert.equal(readdirSync(runDir).length, 0);

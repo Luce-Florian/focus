@@ -21,6 +21,29 @@ export const CLS = {
 
 export type AttentionClass = (typeof CLS)[keyof typeof CLS];
 
+/**
+ * Importance levels. The attention class always wins: importance only breaks
+ * ties *inside* a class, it never promotes a session across a class
+ * boundary. `NORMAL` is the default.
+ */
+export const IMPORTANCE = {
+  LOW: -1,
+  NORMAL: 0,
+  HIGH: 1
+} as const;
+
+export type Importance = (typeof IMPORTANCE)[keyof typeof IMPORTANCE];
+
+export const IMPORTANCE_LABEL: Record<Importance, string> = {
+  [IMPORTANCE.LOW]: 'basse',
+  [IMPORTANCE.NORMAL]: 'normale',
+  [IMPORTANCE.HIGH]: 'haute'
+};
+
+export function isImportance(value: unknown): value is Importance {
+  return value === IMPORTANCE.LOW || value === IMPORTANCE.NORMAL || value === IMPORTANCE.HIGH;
+}
+
 export const STATES = {
   BOOTING: 'booting',
   RUNNING: 'running',
@@ -127,6 +150,8 @@ export interface SessionRow {
   prompt: string | null;
   // One-line description of `prompt`, produced out of band after the launch.
   summary: string | null;
+  // Human-assigned weight, a tiebreak inside an attention class.
+  importance: Importance;
   created_at: number;
   updated_at: number;
 }
@@ -168,6 +193,8 @@ export interface SessionSnapshot {
   state: SessionState;
   cls: AttentionClass;
   clsLabel: string;
+  importance: Importance;
+  importanceLabel: string;
   reason: string;
   lastEvent: string | null;
   since: number;
@@ -194,6 +221,7 @@ export interface CreateSessionSpec {
   readonly label?: string;
   readonly prompt?: string;
   readonly model?: string;
+  readonly importance?: Importance;
 }
 
 /**
@@ -215,6 +243,7 @@ export interface FleetBridge {
   // Native directory picker, or null when the human cancelled.
   pickDir(): Promise<string | null>;
   create(spec: CreateSessionSpec): Promise<CreateResult>;
+  setImportance(uuid: string, importance: Importance): void;
   input(paneId: string, data: string): void;
   focus(uuid: string): void;
   leave(): void;

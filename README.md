@@ -26,12 +26,31 @@ Two invariants keep automatic switching from turning into flicker:
   replays the decision once the guard expires.
 
 Everything that is not the foreground session is second-plane: a slim rail of
-chips showing state, queue rank and age.
+chips showing state, importance, queue rank and age.
+
+### Importance
+
+Each session also carries a human-assigned importance — `low`, `normal` (the
+default) or `high` — set at creation and changeable at any time from its chip in
+the rail. The ordering key becomes **class, then importance, then age of the
+claim**:
+
+- the attention class keeps absolute priority: importance only breaks ties
+  *inside* a class, never across a boundary — a `high` `idle` session never
+  overtakes a `normal` `waiting_perm` one, because a blocked permission weighs
+  more than a finished turn;
+- within one class, the more important session takes the foreground; an equal
+  class with an equal importance still keeps the incumbent, so no ping-pong is
+  introduced;
+- changing the level of a live session re-decides at once, under the same
+  guards as a hook — a sticky manual pick never yields to a mere bump.
+
+The level is persisted in SQLite and survives a restart.
 
 ## Starting a session
 
 The fleet starts empty. `+ session` asks for a working directory (any directory
-on disk), a name, an optional initial prompt and a model, then
+on disk), a name, an optional initial prompt, a model and an importance, then
 `src/main/fleet.ts` does the same thing at runtime that it does at boot:
 
 ```

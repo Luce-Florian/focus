@@ -6,7 +6,10 @@ import {
   STATE_CLASS,
   CLASS_LABEL,
   STATE_LABEL,
+  IMPORTANCE,
+  IMPORTANCE_LABEL,
   type AttentionClass,
+  type Importance,
   type SessionState,
   type HookEventMessage,
   type HookPayload,
@@ -58,6 +61,8 @@ export interface RegisterSession {
   // A resumed session waits for its next instruction: it is not working, no
   // matter that it was created with an initial prompt.
   readonly resumed?: boolean;
+  // Human-assigned weight, `NORMAL` unless said otherwise.
+  readonly importance?: Importance;
 }
 
 export interface SessionRecord {
@@ -69,6 +74,7 @@ export interface SessionRecord {
   model: string | null;
   prompt: string | null;
   summary: string | null;
+  importance: Importance;
   // Not persisted: only meaningful between `register` and the first pane draw.
   resumed: boolean;
   state: SessionState;
@@ -144,6 +150,7 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
       model: session.model ?? null,
       prompt: session.prompt ?? null,
       summary: session.summary ?? null,
+      importance: session.importance ?? IMPORTANCE.NORMAL,
       resumed: session.resumed ?? false,
       state: STATES.BOOTING,
       reason: 'démarrage',
@@ -176,6 +183,20 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     if (!s || !summary) return;
     s.summary = summary;
     this.store.setSummary(uuid, summary);
+    this.emit('change');
+  }
+
+  /**
+   * Human-assigned importance. Persisted, and re-decided at once — same path
+   * as a hook, under the same guards: a sticky manual pick never yields to a
+   * mere bump.
+   */
+  setImportance(uuid: string, importance: Importance): void {
+    const s = this.sessions.get(uuid);
+    if (!s || s.importance === importance) return;
+    s.importance = importance;
+    this.store.setImportance(uuid, importance);
+    this.evaluate();
     this.emit('change');
   }
 
@@ -335,7 +356,12 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
   queue(): SessionRecord[] {
     return [...this.sessions.values()]
       .filter((s) => s.uuid !== this.focused && STATE_CLASS[s.state] > CLS.RUNNING)
-      .sort((a, b) => STATE_CLASS[b.state] - STATE_CLASS[a.state] || a.since - b.since);
+      .sort(
+        (a, b) =>
+          STATE_CLASS[b.state] - STATE_CLASS[a.state] ||
+          b.importance - a.importance ||
+          a.since - b.since
+      );
   }
 
   private _bestCandidate(): SessionRecord | null {
@@ -347,7 +373,12 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     return (
       [...this.sessions.values()]
         .filter((s) => s.uuid !== this.focused && s.state !== STATES.GONE)
-        .sort((a, b) => STATE_CLASS[b.state] - STATE_CLASS[a.state] || b.updatedAt - a.updatedAt)[0] ?? null
+        .sort(
+          (a, b) =>
+            STATE_CLASS[b.state] - STATE_CLASS[a.state] ||
+            b.importance - a.importance ||
+            b.updatedAt - a.updatedAt
+        )[0] ?? null
     );
   }
 
@@ -377,8 +408,12 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     const focusedCls = this.focused ? this.cls(this.focused) : CLS.GONE;
 
     // Move only towards a stronger claim, or away from a session that needs
-    // nothing. An equal claim keeps the incumbent: no ping-pong.
-    const wants = candidateCls > focusedCls || focusedCls <= CLS.RUNNING;
+    // nothing. An equal claim keeps the incumbent: no ping-pong. Importance
+    // only breaks a tie inside a class — it never crosses a class boundary.
+    const wants =
+      candidateCls > focusedCls ||
+      (candidateCls === focusedCls && candidate.importance > (current?.importance ?? IMPORTANCE.LOW)) ||
+      focusedCls <= CLS.RUNNING;
     if (!wants) return;
 
     const defer = Math.max(
@@ -438,6 +473,8 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
       state: s.state,
       cls: STATE_CLASS[s.state],
       clsLabel: STATE_LABEL[s.state] ?? CLASS_LABEL[STATE_CLASS[s.state]],
+      importance: s.importance,
+      importanceLabel: IMPORTANCE_LABEL[s.importance],
       reason: s.reason,
       lastEvent: s.lastEvent,
       since: s.since,

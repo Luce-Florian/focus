@@ -8,7 +8,7 @@ import type { HooksServer } from './hooks-server.ts';
 import type { TmuxBridge } from './tmux.ts';
 import { writeSessionSettings } from './session-settings.ts';
 import { shQuote } from '../shared/sh.ts';
-import type { CreateSessionSpec, HookEventName, ModelOption } from '../shared/protocol.ts';
+import { IMPORTANCE, isImportance, type CreateSessionSpec, type HookEventName, type Importance, type ModelOption } from '../shared/protocol.ts';
 
 /** The slice of `config.ts` the factory reads. Passed in so tests can shrink it. */
 export interface FleetConfig {
@@ -55,6 +55,7 @@ export interface RestorableSession {
   readonly model: string | null;
   readonly prompt: string | null;
   readonly summary: string | null;
+  readonly importance: Importance;
 }
 
 export interface Fleet {
@@ -181,6 +182,7 @@ export function createFleet({
   async function createSession(spec: CreateSessionSpec): Promise<CreatedSession> {
     const { cwd, label, model } = validate(spec);
     const prompt = (spec.prompt ?? '').trim();
+    const importance = isImportance(spec.importance) ? spec.importance : IMPORTANCE.NORMAL;
     const uuid = crypto.randomUUID();
 
     const options = model ? ['--session-id', shQuote(uuid), '--model', shQuote(model)] : ['--session-id', shQuote(uuid)];
@@ -195,7 +197,7 @@ export function createFleet({
     });
 
     try {
-      arbiter.register({ uuid, label, cwd, paneId, windowId, model: model || null, prompt: prompt || null });
+      arbiter.register({ uuid, label, cwd, paneId, windowId, model: model || null, prompt: prompt || null, importance });
     } catch (err: unknown) {
       await bridge.cli(['kill-window', '-t', windowId]).catch(() => undefined);
       rmSync(settingsFile, { force: true });
@@ -248,6 +250,7 @@ export function createFleet({
         model: model || null,
         prompt: row.prompt,
         summary: row.summary,
+        importance: row.importance,
         resumed: true
       });
     } catch (err: unknown) {

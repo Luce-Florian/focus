@@ -10,7 +10,7 @@ import { open, type Store } from './db.ts';
 import { createFleet, resolveClaude, type Fleet } from './fleet.ts';
 import { startHooksServer, type HooksServer } from './hooks-server.ts';
 import { TmuxBridge } from './tmux.ts';
-import type { CreateResult, CreateSessionSpec, FleetSnapshot, ModelOption } from '../shared/protocol.ts';
+import { isImportance, type CreateResult, type CreateSessionSpec, type FleetSnapshot, type ModelOption } from '../shared/protocol.ts';
 
 // A wrong ROOT would otherwise fail silently, one directory join at a time.
 // Packaged, the bundle sits inside a read-only `app.asar` and derives nothing
@@ -209,6 +209,9 @@ ipcMain.on('pane:input', (_e, paneId: string, data: string) => {
   });
 });
 ipcMain.on('fleet:focus', (_e, uuid: string) => arbiter?.focus(uuid));
+ipcMain.on('fleet:set-importance', (_e, uuid: string, importance: unknown) => {
+  if (isImportance(importance)) arbiter?.setImportance(uuid, importance);
+});
 ipcMain.on('fleet:leave', () => arbiter?.leave());
 ipcMain.on('fleet:resize', (_e, cols: number, rows: number) => {
   bridge?.setClientSize(cols, rows).catch(() => undefined);

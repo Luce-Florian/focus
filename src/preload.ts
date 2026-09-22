@@ -10,6 +10,7 @@ const fleet = {
   models: () => ipcRenderer.invoke('fleet:models'),
   pickDir: () => ipcRenderer.invoke('fleet:pick-dir'),
   create: (spec: CreateSessionSpec) => ipcRenderer.invoke('fleet:create', spec),
+  setImportance: (uuid: string, importance: number) => { ipcRenderer.send('fleet:set-importance', uuid, importance); },
   input: (paneId, data) => { ipcRenderer.send('pane:input', paneId, data); },
   focus: (uuid) => { ipcRenderer.send('fleet:focus', uuid); },
   leave: () => { ipcRenderer.send('fleet:leave'); },
