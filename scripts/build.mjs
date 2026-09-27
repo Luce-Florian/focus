@@ -1,19 +1,23 @@
 // Compiles every entry point with esbuild: three application bundles (main,
 // preload, renderer) plus one bundle per test file, each inlining its own
-// copy of the src modules it imports (see the issue: no module in src/main
+// copy of the src modules it imports (see the issue: no module under src/
 // holds mutable module-level state, so that duplication is safe). tsc never
 // emits; this script is the only thing that turns .ts into runnable .js.
 import { build } from 'esbuild';
-import { cpSync, globSync, mkdirSync } from 'node:fs';
+import { cpSync, globSync, mkdirSync, rmSync } from 'node:fs';
 
 const OUT = 'dist';
 
 async function main() {
+  // Wiped, never merged into: esbuild leaves whatever it did not overwrite,
+  // and `npm test` globs dist/test — a bundle of a deleted test file would
+  // keep passing forever.
+  rmSync(OUT, { recursive: true, force: true });
   mkdirSync(`${OUT}/renderer`, { recursive: true });
 
   await Promise.all([
     build({
-      entryPoints: ['src/main/index.ts'],
+      entryPoints: ['src/infrastructure/electron/main.ts'],
       outfile: `${OUT}/main.js`,
       bundle: true,
       platform: 'node',

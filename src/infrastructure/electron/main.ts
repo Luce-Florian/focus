@@ -1,16 +1,22 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 
-import { Arbiter } from './arbiter.ts';
-import * as cfg from './config.ts';
-import { open, type Store } from './db.ts';
-import { createFleet, resolveClaude, type Fleet } from './fleet.ts';
-import { startHooksServer, type HooksServer } from './hooks-server.ts';
-import { TmuxBridge } from './tmux.ts';
-import { isImportance, type CreateResult, type CreateSessionSpec, type FleetSnapshot, type ModelOption } from '../shared/protocol.ts';
+import * as cfg from '../config.ts';
+import { claudeProfile } from '../agents/claude/profile.ts';
+import { startHooksServer, type HooksServer } from '../hooks/hook-server.ts';
+import { open, type Store } from '../sqlite/store.ts';
+import { TmuxBridge } from '../tmux/tmux-bridge.ts';
+import { Arbiter } from '../../domain/arbiter.ts';
+import type { AgentId, HookEventMessage } from '../../domain/agent.ts';
+import { createFleet, type Fleet } from '../../application/fleet.ts';
+import type { AgentProfile, AgentRegistry } from '../../application/ports.ts';
+import { createHandleAgentEvent } from '../../application/use-cases/handle-agent-event.ts';
+import { createRestoreFleet } from '../../application/use-cases/restore-fleet.ts';
+import { createSetImportance } from '../../application/use-cases/set-importance.ts';
+import type { CreateResult, CreateSessionSpec, FleetSnapshot } from '../../shared/protocol.ts';
 
 // A wrong ROOT would otherwise fail silently, one directory join at a time.
 // Packaged, the bundle sits inside a read-only `app.asar` and derives nothing
@@ -19,11 +25,11 @@ if (!app.isPackaged) cfg.assertProjectRoot(cfg.ROOT);
 
 /**
  * Launched from the Finder, a macOS application inherits
- * `/usr/bin:/bin:/usr/sbin:/sbin` and nothing more. Both binaries the fleet
- * spawns — `tmux` and `claude` — live where only the login shell looks
- * (Homebrew, nvm, `~/.local/bin`), so `which claude` would fail on an
- * installed build while working in development. Ask the login shell once,
- * rather than guessing a list of prefixes.
+ * `/usr/bin:/bin:/usr/sbin:/sbin` and nothing more. The binaries the fleet
+ * spawns — `tmux` and the agents — live where only the login shell looks
+ * (Homebrew, nvm, `~/.local/bin`), so a `which` would fail on an installed
+ * build while working in development. Ask the login shell once, rather than
+ * guessing a list of prefixes.
  */
 function adoptLoginPath(): void {
   const shell = process.env.SHELL ?? '/bin/zsh';
@@ -44,6 +50,14 @@ let bridge: TmuxBridge | null = null;
 let arbiter: Arbiter | null = null;
 let hooks: HooksServer | null = null;
 let fleet: Fleet | null = null;
+let registry: AgentRegistry | null = null;
+// no-op until the composition root wires the real ones in `bootFleet`.
+let handleAgentEventFn: (msg: HookEventMessage) => void = () => {
+  void 0;
+};
+let setImportance: (uuid: string, importance: unknown) => void = () => {
+  void 0;
+};
 
 function pushState(): void {
   if (win && !win.isDestroyed() && arbiter) win.webContents.send('fleet:state', arbiter.snapshot());
@@ -63,13 +77,18 @@ async function bootFleet(): Promise<void> {
 
   store = open(path.join(runDir, 'fleet.db'));
 
-  hooks = await startHooksServer({
-    host: cfg.HOOK_HOST,
-    onEvent: (evt) => arbiter?.handleHook(evt)
-  });
-  console.log(`[hooks] listening on http://${cfg.HOOK_HOST}:${hooks.port}`);
+  // Composition root: the only place where concrete adapters meet the
+  // application's ports. Adding an agent means adding one line here.
+  const profiles: readonly AgentProfile[] = [claudeProfile({ runDir })];
+  registry = {
+    get: (id: AgentId) => profiles.find((p) => p.id === id),
+    list: () => [...profiles]
+  };
 
   arbiter = new Arbiter({ store, options: { bootTimeoutMs: cfg.BOOT_TIMEOUT_MS } });
+  handleAgentEventFn = createHandleAgentEvent({ arbiter, profiles: registry, fallback: 'claude' });
+  setImportance = createSetImportance({ arbiter });
+
   arbiter.on('change', pushState);
   arbiter.on('orphan', ({ uuid, event }) => {
     console.warn(`[hooks] ${event} for unknown session ${uuid}`);
@@ -86,6 +105,14 @@ async function bootFleet(): Promise<void> {
       console.error('[fleet] discard', err instanceof Error ? err.message : err);
     });
   });
+
+  hooks = await startHooksServer({
+    host: cfg.HOOK_HOST,
+    onEvent: (evt) => {
+      handleAgentEventFn(evt);
+    }
+  });
+  console.log(`[hooks] listening on http://${cfg.HOOK_HOST}:${hooks.port}`);
 
   bridge = new TmuxBridge({ socket: cfg.TMUX_SOCKET, session: cfg.TMUX_SESSION });
   await bridge.createServer();
@@ -109,40 +136,32 @@ async function bootFleet(): Promise<void> {
   });
 
   fleet = createFleet({
-    cfg: { ...cfg, RUN_DIR: runDir },
-    bridge,
+    cfg: { RUN_DIR: runDir, MAX_SESSIONS: cfg.MAX_SESSIONS, SESSION_END_MARKER: cfg.SESSION_END_MARKER },
+    multiplexer: bridge,
     arbiter,
-    hooks,
-    claudeBin: resolveClaude()
+    hooks: { host: cfg.HOOK_HOST, port: hooks.port, token: hooks.token },
+    profiles: registry
   });
 
-  // `gone` and `failed` sessions are never brought back; the queue is derived
-  // state and is rebuilt from what survives.
-  store.purge();
-
   // Sessions that were alive at the last shutdown come back on their own:
-  // same uuid, fresh pane, conversation resumed. A restore that cannot happen
-  // (directory gone, model retired, fleet full) is skipped with a log, not a
-  // crash — the rest of the fleet still deserves to come up.
-  for (const row of store.listRestorable()) {
-    try {
-      const s = await fleet.restoreSession(row);
+  // same uuid, fresh pane, conversation resumed. The restore pass purges
+  // the dead rows, replays creation order, and sweeps orphan settings files.
+  await createRestoreFleet({
+    cfg: { RUN_DIR: runDir, MAX_SESSIONS: cfg.MAX_SESSIONS, SESSION_END_MARKER: cfg.SESSION_END_MARKER },
+    store,
+    arbiter,
+    multiplexer: bridge,
+    hooks: { host: cfg.HOOK_HOST, port: hooks.port, token: hooks.token },
+    profiles: registry,
+    onRestored: (s) => {
       console.log(`[fleet] restored ${s.label} uuid=${s.uuid} pane=${s.paneId} window=${s.windowId}`);
-    } catch (err: unknown) {
-      console.error(`[fleet] restore ${row.label} failed:`, err instanceof Error ? err.message : err);
-      store.deleteSession(row.uuid);
+    },
+    onRestoreFailed: (label, err) => {
+      console.error(`[fleet] restore ${label} failed:`, err instanceof Error ? err.message : err);
     }
-  }
+  })();
 
-  // Settings files whose session is gone — purged rows, restores that rolled
-  // back — outlive nothing: hook URLs in them point at a dead port anyway.
-  const alive = new Set(arbiter.live().map((s) => s.uuid));
-  for (const f of readdirSync(runDir)) {
-    const m = /^([0-9a-f-]{36})\.settings\.json$/.exec(f);
-    if (m?.[1] && !alive.has(m[1])) rmSync(path.join(runDir, f), { force: true });
-  }
-
-  // The fleet can also be seeded from config.ts; the human creates the rest
+  // The fleet can also be seeded from config; the human creates the rest
   // from the interface, on the directories they choose.
   for (const spec of cfg.SESSIONS) {
     try {
@@ -177,7 +196,11 @@ void app.whenReady().then(async () => {
 ipcMain.handle('fleet:ready', (): FleetSnapshot =>
   arbiter ? arbiter.snapshot() : { sessions: [], focused: null, lastSwitch: null }
 );
-ipcMain.handle('fleet:models', (): readonly ModelOption[] => cfg.MODELS);
+ipcMain.handle('fleet:agents', () => {
+  if (!registry) return [];
+  return registry.list().map(({ id, label }) => ({ id, label }));
+});
+ipcMain.handle('fleet:models', (_e, agent: AgentId) => registry?.get(agent)?.models() ?? []);
 
 ipcMain.handle('fleet:pick-dir', async (): Promise<string | null> => {
   if (!win || win.isDestroyed()) return null;
@@ -210,7 +233,7 @@ ipcMain.on('pane:input', (_e, paneId: string, data: string) => {
 });
 ipcMain.on('fleet:focus', (_e, uuid: string) => arbiter?.focus(uuid));
 ipcMain.on('fleet:set-importance', (_e, uuid: string, importance: unknown) => {
-  if (isImportance(importance)) arbiter?.setImportance(uuid, importance);
+  setImportance(uuid, importance);
 });
 ipcMain.on('fleet:leave', () => arbiter?.leave());
 ipcMain.on('fleet:resize', (_e, cols: number, rows: number) => {

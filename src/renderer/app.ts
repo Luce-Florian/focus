@@ -1,7 +1,7 @@
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 
-import type { SessionSnapshot, FleetSnapshot, Importance } from '../shared/protocol.ts';
+import type { AgentId, SessionSnapshot, FleetSnapshot, Importance } from '../shared/protocol.ts';
 import { IMPORTANCE, IMPORTANCE_LABEL } from '../shared/protocol.ts';
 
 function required(id: string): HTMLElement {
@@ -31,6 +31,7 @@ const form = requiredAs('create-form', HTMLFormElement);
 const cwdInput = requiredAs('cwd', HTMLInputElement);
 const labelInput = requiredAs('label', HTMLInputElement);
 const promptInput = requiredAs('prompt', HTMLTextAreaElement);
+const agentSelect = requiredAs('agent', HTMLSelectElement);
 const modelSelect = requiredAs('model', HTMLSelectElement);
 const importanceSelect = requiredAs('importance', HTMLSelectElement);
 const errorEl = required('create-error');
@@ -221,10 +222,17 @@ window.fleet.onState((s) => {
 
 // ---- creation ----
 
+/** Each agent carries its own model list; picking one refreshes the other. */
+async function loadModels(): Promise<void> {
+  const models = await window.fleet.models(agentSelect.value as AgentId);
+  modelSelect.replaceChildren(...models.map((m) => new Option(m.label, m.id)));
+}
+
 async function openCreate(): Promise<void> {
-  if (modelSelect.options.length === 0) {
-    const models = await window.fleet.models();
-    modelSelect.replaceChildren(...models.map((m) => new Option(m.label, m.id)));
+  if (agentSelect.options.length === 0) {
+    const agents = await window.fleet.agents();
+    agentSelect.replaceChildren(...agents.map((a) => new Option(a.label, a.id)));
+    await loadModels();
   }
   errorEl.hidden = true;
   submitBtn.disabled = false;
@@ -249,6 +257,8 @@ browseBtn.onclick = () => {
 
 cancelBtn.onclick = () => { dlg.close(); };
 
+agentSelect.onchange = () => { void loadModels(); };
+
 form.onsubmit = (e) => {
   e.preventDefault();
   if (!cwdInput.value) {
@@ -262,6 +272,7 @@ form.onsubmit = (e) => {
       cwd: cwdInput.value,
       label: labelInput.value,
       prompt: promptInput.value,
+      agent: agentSelect.value as AgentId,
       model: modelSelect.value,
       importance: Number.parseInt(importanceSelect.value, 10) as Importance
     })
@@ -273,6 +284,9 @@ form.onsubmit = (e) => {
       form.reset();
       cwdInput.value = '';
       labelInput.placeholder = 'nom du répertoire';
+      // `reset()` puts the agent back to the first option: the model list on
+      // screen still belongs to the agent that was picked, so refresh it.
+      void loadModels();
       dlg.close();
     });
 };

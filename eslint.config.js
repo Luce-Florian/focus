@@ -19,6 +19,59 @@ export default tseslint.config(
     }
   },
   {
+    // Hexagonal boundary, enforced rather than documented: the domain stays
+    // pure (no application, no infrastructure, no shared façade), and the
+    // application talks to ports, never to adapters.
+    files: ['src/domain/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/application/**', '**/infrastructure/**', '**/shared/**'],
+              message: 'the domain stays pure: no application, infrastructure or shared imports'
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    files: ['src/application/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/infrastructure/**'],
+              message: 'the application talks to ports, not to adapters'
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    // The sandboxed processes see the façade and nothing else: `protocol.ts`
+    // is the only layer the UI is allowed to import.
+    files: ['src/renderer/**/*.ts', 'src/preload.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/domain/**', '**/application/**', '**/infrastructure/**'],
+              message: 'the UI imports shared/protocol.ts, never a layer directly'
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
     // Test doubles legitimately need no-op stub methods (fakeStore, a fake
     // timer's unref()); production code never does.
     files: ['test/**/*.ts'],
@@ -28,7 +81,14 @@ export default tseslint.config(
   },
   {
     // Electron main, the preload bundle and the test suite all run under Node.
-    files: ['src/main/**/*.ts', 'src/preload.ts', 'src/shared/**/*.ts', 'test/**/*.ts'],
+    files: [
+      'src/domain/**/*.ts',
+      'src/application/**/*.ts',
+      'src/infrastructure/**/*.ts',
+      'src/preload.ts',
+      'src/shared/**/*.ts',
+      'test/**/*.ts'
+    ],
     languageOptions: { globals: globals.node }
   },
   {

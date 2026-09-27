@@ -1,10 +1,11 @@
 /**
  * End-to-end smoke test without Electron: real tmux control mode, real HTTP
- * hook endpoint, real arbiter, real SQLite, and the real session factory.
+ * hook endpoint, real arbiter, real SQLite, real use cases and the real
+ * claude adapter.
  *
  * Sessions are created the way the user interface creates them — through
  * `createFleet().createSession()` — against a stub standing in for the
- * `claude` binary. The stub reads the very arguments the factory builds
+ * `claude` binary. The stub reads the very arguments the adapter builds
  * (`--session-id`, `--settings`, `--model`, the positional prompt), so the
  * command line is exercised rather than assumed.
  *
@@ -16,31 +17,27 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { Arbiter } from '../src/main/arbiter.ts';
-import { open } from '../src/main/db.ts';
-import { createFleet, type FleetConfig } from '../src/main/fleet.ts';
-import { startHooksServer } from '../src/main/hooks-server.ts';
-import { TmuxBridge } from '../src/main/tmux.ts';
-import { IMPORTANCE, type HookEventName } from '../src/shared/protocol.ts';
+import { Arbiter } from '../src/domain/arbiter.ts';
+import type { HookEventMessage } from '../src/domain/agent.ts';
+import { open } from '../src/infrastructure/sqlite/store.ts';
+import { createFleet, type Fleet } from '../src/application/fleet.ts';
+import type { AgentRegistry, FleetConfig } from '../src/application/ports.ts';
+import { createHandleAgentEvent } from '../src/application/use-cases/handle-agent-event.ts';
+import { startHooksServer } from '../src/infrastructure/hooks/hook-server.ts';
+import { TmuxBridge } from '../src/infrastructure/tmux/tmux-bridge.ts';
+import { claudeProfile } from '../src/infrastructure/agents/claude/profile.ts';
+import { IMPORTANCE } from '../src/domain/attention.ts';
 
 const HOST = '127.0.0.1';
 const SOCKET = 'fleet-smoke';
 const SESSION = 'smoke';
-const HOOK_EVENTS: readonly HookEventName[] = [
-  'SessionStart',
-  'UserPromptSubmit',
-  'PreToolUse',
-  'Notification',
-  'Stop',
-  'SessionEnd'
-];
 const BOOT_TIMEOUT_MS = 1500;
 const END_MARKER = '[fleet] session ended';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Stub `claude`. It parses the factory's own command line, then plays the
+ * Stub `claude`. It parses the adapter's own command line, then plays the
  * scenario named by the positional prompt.
  */
 function writeFakeClaude(dir: string, base: string): string {
@@ -100,6 +97,13 @@ sleep 60
   return file;
 }
 
+function registryFor(bin: string, runDir: string, summarize?: (prompt: string) => Promise<string | null>): AgentRegistry {
+  const profile = claudeProfile(
+    summarize ? { bin, runDir, summarize } : { bin, runDir }
+  );
+  return { get: (id) => (id === 'claude' ? profile : undefined), list: () => [profile] };
+}
+
 async function main(): Promise<void> {
   const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-smoke-'));
   const workdir = path.join(tmpdir, 'work');
@@ -108,12 +112,12 @@ async function main(): Promise<void> {
   const output = new Map<string, string>(); // paneId -> accumulated text
 
   const arbiter = new Arbiter({ store, options: { bootTimeoutMs: BOOT_TIMEOUT_MS } });
-  const hooks = await startHooksServer({
-    host: HOST,
-    onEvent: (e) => {
-      arbiter.handleHook(e);
-    }
-  });
+  // Indirection on purpose: the registry needs the hook port, the hook
+  // endpoint needs the registry — the handler is wired in once both exist.
+  let onEvent: (e: HookEventMessage) => void = () => {};
+  const hooks = await startHooksServer({ host: HOST, onEvent: (e) => {
+    onEvent(e);
+  } });
 
   const bridge = new TmuxBridge({ socket: SOCKET, session: SESSION });
   await bridge.createServer();
@@ -122,31 +126,30 @@ async function main(): Promise<void> {
   // `MAX_SESSIONS` is read at call time so the ceiling check below can move it.
   const cfg: { -readonly [K in keyof FleetConfig]: FleetConfig[K] } = {
     RUN_DIR: tmpdir,
-    HOOK_HOST: HOST,
-    HOOK_EVENTS,
     SESSION_END_MARKER: END_MARKER,
-    MAX_SESSIONS: 8,
-    MODELS: [
-      { id: '', label: 'défaut' },
-      { id: 'sonnet', label: 'Sonnet' }
-    ],
-    SUMMARY_MODEL: 'haiku',
-    SUMMARY_TIMEOUT_MS: 5000,
-    SUMMARY_MAX_CHARS: 120
+    MAX_SESSIONS: 8
   };
 
   const summarised: string[] = [];
-  const fleet = createFleet({
-    cfg,
-    bridge,
-    arbiter,
-    hooks,
-    claudeBin: writeFakeClaude(tmpdir, `http://${HOST}:${hooks.port}/h/${hooks.token}`),
+  const registry = registryFor(
+    writeFakeClaude(tmpdir, `http://${HOST}:${hooks.port}/h/${hooks.token}`),
+    tmpdir,
     // The out-of-band pass is stubbed: the smoke proves the wiring, not the model.
-    summarize: ({ prompt }) => {
+    (prompt) => {
       summarised.push(prompt);
       return Promise.resolve(`RÉSUMÉ ${prompt}`);
     }
+  );
+
+  const handleAgentEvent = createHandleAgentEvent({ arbiter, profiles: registry, fallback: 'claude' });
+  onEvent = handleAgentEvent;
+
+  const fleet: Fleet = createFleet({
+    cfg,
+    multiplexer: bridge,
+    arbiter,
+    hooks: { host: HOST, port: hooks.port, token: hooks.token },
+    profiles: registry
   });
 
   bridge.on('output', (paneId, bytes) => {
@@ -162,7 +165,6 @@ async function main(): Promise<void> {
       console.error('[fleet] discard', err instanceof Error ? err.message : err);
     });
   });
-
   const checks: string[] = [];
   const record = (name: string, err?: unknown) => {
     if (err === undefined) {
@@ -241,7 +243,7 @@ async function main(): Promise<void> {
     assert.match(all, /BETA-BANNER/, 'background window streams too');
   });
 
-  check('the factory command line reached the binary intact', () => {
+  check('the adapter command line reached the binary intact', () => {
     const all = [...output.values()].join('');
     assert.match(all, new RegExp(`UUID=${alpha.uuid} MODEL=sonnet PROMPT=scenario-alpha`));
     assert.match(all, /SETTINGS-OK/, 'the per-session settings file exists at launch');
@@ -316,7 +318,7 @@ async function main(): Promise<void> {
   // ---- normal end of life ----
 
   check('SessionEnd removes a session created at runtime', () => {
-    arbiter.handleHook({ uuid: beta.uuid, event: 'SessionEnd', payload: {} });
+    handleAgentEvent({ uuid: beta.uuid, event: 'SessionEnd', payload: {} });
     assert.equal(arbiter.get(beta.uuid)?.state, 'gone');
     assert.equal(arbiter.live().length, 1);
     assert.notEqual(arbiter.focused, beta.uuid);
@@ -335,23 +337,28 @@ async function main(): Promise<void> {
   store.close();
 
   const store2 = open(path.join(tmpdir, 'fleet.db'));
+  // What the restore pass runs at boot: drop the dead rows before listing.
   store2.purge();
   const arbiter2 = new Arbiter({ store: store2, options: { bootTimeoutMs: BOOT_TIMEOUT_MS } });
-  const hooks2 = await startHooksServer({
-    host: HOST,
-    onEvent: (e) => {
-      arbiter2.handleHook(e);
-    }
-  });
+  let onEvent2: (e: HookEventMessage) => void = () => {};
+  const hooks2 = await startHooksServer({ host: HOST, onEvent: (e) => {
+    onEvent2(e);
+  } });
+  const registry2 = registryFor(
+    writeFakeClaude(tmpdir, `http://${HOST}:${hooks2.port}/h/${hooks2.token}`),
+    tmpdir
+  );
+  onEvent2 = createHandleAgentEvent({ arbiter: arbiter2, profiles: registry2, fallback: 'claude' });
+
   const bridge2 = new TmuxBridge({ socket: SOCKET, session: SESSION });
   await bridge2.createServer();
   bridge2.attach();
-  const fleet2 = createFleet({
+  const fleet2: Fleet = createFleet({
     cfg,
-    bridge: bridge2,
+    multiplexer: bridge2,
     arbiter: arbiter2,
-    hooks: hooks2,
-    claudeBin: writeFakeClaude(tmpdir, `http://${HOST}:${hooks2.port}/h/${hooks2.token}`)
+    hooks: { host: HOST, port: hooks2.port, token: hooks2.token },
+    profiles: registry2
   });
   const output2 = new Map<string, string>();
   bridge2.on('output', (paneId, bytes) => {
@@ -373,6 +380,7 @@ async function main(): Promise<void> {
 
   const [restorable] = store2.listRestorable();
   assert.ok(restorable, 'alpha survived the purge');
+  assert.equal(restorable.agent, 'claude', 'the row says which profile to resume it with');
   const restored = await fleet2.restoreSession(restorable);
 
   check('a restored session keeps its uuid and takes the floor on its own', () => {
@@ -401,7 +409,7 @@ async function main(): Promise<void> {
     assert.match(all, new RegExp(`UUID=${alpha.uuid} MODEL=sonnet PROMPT=\\s`), 'resumed, no prompt replay');
   });
 
-  check('the restored settings file points at this boot\'s hook port', () => {
+  check("the restored settings file points at this boot's hook port", () => {
     const settings = fs.readFileSync(path.join(tmpdir, `${alpha.uuid}.settings.json`), 'utf8');
     assert.ok(settings.includes(`:${hooks2.port}/`), `hook URL rebuilt for port ${hooks2.port}`);
   });

@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert';
 import http from 'node:http';
 
-import { startHooksServer } from '../../src/main/hooks-server.ts';
-import type { HookEventMessage } from '../../src/shared/protocol.ts';
+import { startHooksServer } from '../../../src/infrastructure/hooks/hook-server.ts';
+import { hookUrl, parseHookPath } from '../../../src/shared/protocol.ts';
+import type { HookEventMessage } from '../../../src/domain/agent.ts';
 
 function rawPost(port: number, urlPath: string, body: string): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -84,4 +85,16 @@ void test('a GET request is rejected, a malformed URL is 404', async () => {
   } finally {
     hooks.server.close();
   }
+});
+
+void test('a hook URL round-trips through the parser that routes it', () => {
+  const parsed = parseHookPath(new URL(hookUrl('127.0.0.1', 8080, 'tok', 'uuid-1', 'Notification')).pathname);
+  assert.deepEqual(parsed, { token: 'tok', uuid: 'uuid-1', event: 'Notification' });
+});
+
+void test('parseHookPath rejects anything that is not a hook path', () => {
+  assert.equal(parseHookPath('/'), null);
+  assert.equal(parseHookPath('/h/tok/uuid'), null);
+  assert.equal(parseHookPath('/nope/tok/uuid/Stop'), null);
+  assert.equal(parseHookPath('/h/tok/uuid/Stop/extra'), null);
 });

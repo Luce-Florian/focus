@@ -50,8 +50,9 @@ The level is persisted in SQLite and survives a restart.
 ## Starting a session
 
 The fleet starts empty. `+ session` asks for a working directory (any directory
-on disk), a name, an optional initial prompt, a model and an importance, then
-`src/main/fleet.ts` does the same thing at runtime that it does at boot:
+on disk), an agent, a name, an optional initial prompt, a model and an
+importance, then the `create-session` use case (`src/application/`) does the
+same thing at runtime that it does at boot:
 
 ```
 validate cwd → mint uuid → write settings → tmux new-window → register → focus
@@ -226,7 +227,7 @@ xattr -dr com.apple.quarantine /Applications/Focus.app
 ### Installed, the application no longer lives in the repository
 
 Two things change when the code runs from a read-only `app.asar` instead of a
-checkout, both handled in `src/main/index.ts`:
+checkout, both handled in `src/infrastructure/electron/main.ts`:
 
 - **`run/` moves to `userData`** — `~/Library/Application Support/Focus/run`
   holds the per-session settings files and `fleet.db`, because nothing can be
@@ -237,12 +238,17 @@ checkout, both handled in `src/main/index.ts`:
 
 ## Layout
 
+Hexagonal: the domain is pure, the application composes use cases over ports,
+the infrastructure holds every adapter, and `shared/protocol.ts` is the only
+facade the UI ever imports. ESLint enforces the boundary (`no-restricted-imports`)
+rather than merely documenting it.
+
 ```
 .
 ├── Makefile                  entry point for every command (make help)
 ├── CLAUDE.md -> README.md    project memory, same file
 ├── tsconfig.json              strict TypeScript config (noEmit: esbuild compiles)
-├── eslint.config.js           typescript-eslint strictTypeChecked + stylisticTypeChecked
+├── eslint.config.js           typescript-eslint strictTypeChecked + stylisticTypeChecked + layer boundaries
 ├── electron-builder.yml       macOS packaging: what ships, ad-hoc signature, dmg name
 ├── commitlint.config.js       Conventional Commits, the input of the version bump
 ├── release-please-config.json  release type and changelog, plus its version manifest
@@ -253,34 +259,66 @@ checkout, both handled in `src/main/index.ts`:
 ├── scripts/
 │   └── build.mjs               esbuild: main, preload, renderer and test bundles
 ├── src/
+│   ├── domain/                pure core, zero infrastructure imports
+│   │   ├── attention.ts        attention classes, importance, session states
+│   │   ├── agent.ts           AgentId, normalised AgentEvent, hook payload shapes
+│   │   ├── session.ts         SessionRecord, snapshots as the UI sees them
+│   │   ├── ports.ts           SessionRepository, clock, scheduler
+│   │   └── arbiter.ts         the focus policy and its guards
+│   ├── application/           use cases over ports
+│   │   ├── ports.ts           PaneMultiplexer, HookSink, AgentProfile, AgentRegistry
+│   │   ├── fleet.ts           orchestrator composing the use cases
+│   │   └── use-cases/
+│   │       ├── create-session.ts    validate → settings → pane → register → focus
+│   │       ├── restore-fleet.ts     purge → resume what survived, skip the impossible
+│   │       ├── observe-pane-output.ts  liveness: end marker vs first bytes
+│   │       ├── handle-agent-event.ts   raw hook → profile translation → arbiter
+│   │       ├── discard-session.ts  tear down a launch that never came up
+│   │       └── set-importance.ts  persist and re-decide the level
+│   ├── infrastructure/        adapters
+│   │   ├── tmux/tmux-bridge.ts      control mode bridge, octal decoder, send-keys
+│   │   ├── hooks/hook-server.ts     loopback hook endpoint, identity from the URL
+│   │   ├── sqlite/store.ts          SQLite schema and queries
+│   │   ├── agents/claude/           the Claude Code adapter: command lines,
+│   │   │                            settings file, hook translation, models, summary
+│   │   ├── electron/main.ts         composition root: adapters meet ports, IPC
+│   │   └── config.ts               paths, tmux socket, fleet limits
 │   ├── shared/
-│   │   └── protocol.ts        attention classes, hook payloads, tmux/contextBridge/SQLite shapes
-│   ├── main/
-│   │   ├── index.ts           Electron main: wires bridge, hooks, arbiter, IPC
-│   │   ├── fleet.ts           session factory: validate, launch, roll back, summarise
-│   │   ├── arbiter.ts         attention classes, focus policy, guards
-│   │   ├── tmux.ts            control mode bridge, octal decoder, send-keys
-│   │   ├── hooks-server.ts    loopback hook endpoint, identity from the URL
-│   │   ├── session-settings.ts  per-session `--settings` file generator
-│   │   ├── db.ts              SQLite schema and queries
-│   │   └── config.ts          paths, tmux socket, hook events, fleet limits
+│   │   └── protocol.ts        UI facade: contextBridge contract, re-exports domain
 │   ├── preload.ts             contextBridge: state, output, input, focus, importance
 │   └── renderer/              topbar, full-bleed terminal, second-plane rail
 ├── test/
-│   ├── main/                  one *.test.ts per src/main module
-│   ├── shared/                 protocol.test.ts
+│   ├── domain/                attention and arbiter state machine, fake clock
+│   ├── application/           use cases over fake ports and fake profiles
+│   ├── infrastructure/        one *.test.ts per adapter
+│   ├── helpers/               shared temp-directory cleanup
 │   └── smoke-e2e.ts           full stack without Electron
 ├── dist/                      generated: esbuild output, gitignored
 ├── run/                      generated: settings files, fleet.db
 └── workspaces/               leftover POC sandboxes, no longer wired in
 ```
 
+### Adding another agent
+
+Everything agent-specific lives behind the `AgentProfile` port
+(`src/application/ports.ts`): resolve the binary, build the launch and resume
+command lines, write the per-session settings file — *and* name it, so a
+failed launch and the boot sweep can take it down without knowing the
+scheme — summarise a prompt, and translate that agent's raw events into the
+domain's normalised `AgentEvent`.
+Supporting Codex or opencode means writing one folder under
+`src/infrastructure/agents/` and adding one line to the composition root in
+`src/infrastructure/electron/main.ts` — no domain, use case or store change.
+The session row already carries its `agent` column, so a session created with
+one agent is restored with the same one.
+
 SQLite (`run/fleet.db`) holds the session registry, the current claims and an
 append-only `hook_events` log. Electron owns the tmux lifecycle: every launch
 relaunches the sessions that were alive at the previous shutdown, the event log
 survives.
 
-`src/main/config.ts` no longer declares the sessions themselves — `SESSIONS` is
-an optional seed, empty by default. It holds the fleet's limits instead:
-`MAX_SESSIONS`, `BOOT_TIMEOUT_MS`, `SESSION_END_MARKER`, the models offered at
-creation and the summary settings.
+`src/infrastructure/config.ts` no longer declares the sessions themselves —
+`SESSIONS` is an optional seed, empty by default. It holds the fleet's limits
+instead: `MAX_SESSIONS`, `BOOT_TIMEOUT_MS`, `SESSION_END_MARKER`. The models
+offered at creation and the summary settings are the claude adapter's business
+(`src/infrastructure/agents/claude/models.ts`).

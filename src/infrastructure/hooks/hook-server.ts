@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 
-import { parseHookPath, type HookEventMessage, type HookPayload } from '../shared/protocol.ts';
+import type { HookEventMessage, HookPayload } from '../../domain/agent.ts';
+import { parseHookPath } from '../../shared/protocol.ts';
 
 const MAX_BODY = 1 << 20;
 

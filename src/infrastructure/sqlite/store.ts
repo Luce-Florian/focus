@@ -2,43 +2,35 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { STATES, type HookPayload, type Importance, type QueueRow, type SessionRow, type SessionState, type HookEventRow } from '../shared/protocol.ts';
+import type { AgentId, HookPayload } from '../../domain/agent.ts';
+import { STATES, type Importance, type SessionState } from '../../domain/attention.ts';
+import type { SessionRowInput } from '../../domain/ports.ts';
+import type { FleetStore, RestorableSession } from '../../application/ports.ts';
 
-export interface NewSession {
-  readonly uuid: string;
-  readonly label: string;
-  readonly cwd: string;
-  readonly paneId: string | null;
-  readonly windowId: string | null;
-  readonly state: SessionState;
-  readonly model: string | null;
-  readonly prompt: string | null;
-  readonly summary: string | null;
-  readonly importance: Importance;
-  readonly createdAt: number;
+export { type SessionRowInput } from '../../domain/ports.ts';
+
+/** `queue` table row: sessions currently claiming attention. */
+export interface QueueRow {
+  uuid: string;
+  class: number;
+  reason: string | null;
+  enqueued_at: number;
 }
 
-/** The subset of the store the arbiter depends on; see `test/main/arbiter.test.ts`'s fake. */
-export interface ArbiterStore {
-  insertSession(session: NewSession): void;
-  updateSessionState(uuid: string, state: SessionState, ts: number): void;
-  logHookEvent(uuid: string, event: string, payload: HookPayload, ts: number): void;
-  upsertQueue(uuid: string, cls: number, reason: string, ts: number): void;
-  deleteQueue(uuid: string): void;
-  setSummary(uuid: string, summary: string): void;
-  setImportance(uuid: string, importance: Importance): void;
-  deleteSession(uuid: string): void;
+/** `hook_events` table row: the append-only log that survives a restart. */
+export interface HookEventRow {
+  id: number;
+  uuid: string;
+  event: string;
+  payload: string; // JSON-encoded HookPayload
+  ts: number;
 }
 
-export interface Store extends ArbiterStore {
+/** The store's full SQLite surface, tests included. */
+export interface Store extends FleetStore {
   readonly db: DatabaseSync;
   readQueue(): QueueRow[];
   recentEvents(limit: number): HookEventRow[];
-  /** Sessions still alive at the last shutdown, oldest first. */
-  listRestorable(): SessionRow[];
-  /** Boot-time cleanup: drop `gone`/`failed` rows and stale queue entries. */
-  purge(): void;
-  close(): void;
 }
 
 /**
@@ -49,7 +41,8 @@ const SESSION_COLUMNS: readonly (readonly [string, string])[] = [
   ['model', 'TEXT'],
   ['prompt', 'TEXT'],
   ['summary', 'TEXT'],
-  ['importance', 'INTEGER NOT NULL DEFAULT 0']
+  ['importance', 'INTEGER NOT NULL DEFAULT 0'],
+  ['agent', "TEXT NOT NULL DEFAULT 'claude'"]
 ];
 
 function migrateSessions(db: DatabaseSync): void {
@@ -58,6 +51,22 @@ function migrateSessions(db: DatabaseSync): void {
   for (const [name, type] of SESSION_COLUMNS) {
     if (!present.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
   }
+}
+
+interface SessionDbRow {
+  uuid: string;
+  label: string;
+  cwd: string;
+  pane_id: string | null;
+  window_id: string | null;
+  state: SessionState;
+  model: string | null;
+  prompt: string | null;
+  summary: string | null;
+  importance: number;
+  agent: string;
+  created_at: number;
+  updated_at: number;
 }
 
 export function open(dbPath: string): Store {
@@ -104,13 +113,13 @@ export function open(dbPath: string): Store {
       db.prepare('DELETE FROM sessions WHERE state IN (?, ?)').run(STATES.GONE, STATES.FAILED);
       db.prepare('DELETE FROM queue WHERE uuid NOT IN (SELECT uuid FROM sessions)').run();
     },
-    insertSession(s) {
+    insertSession(s: SessionRowInput) {
       // Upsert, not insert: a restored session already has its row, and its
       // `created_at` is what orders the next restore pass — it must survive.
       db.prepare(
         `INSERT INTO sessions
-           (uuid, label, cwd, pane_id, window_id, state, model, prompt, summary, importance, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (uuid, label, cwd, pane_id, window_id, state, model, prompt, summary, importance, agent, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(uuid) DO UPDATE SET
            pane_id = excluded.pane_id,
            window_id = excluded.window_id,
@@ -119,6 +128,7 @@ export function open(dbPath: string): Store {
            prompt = excluded.prompt,
            summary = excluded.summary,
            importance = excluded.importance,
+           agent = excluded.agent,
            updated_at = excluded.updated_at`
       ).run(
         s.uuid,
@@ -131,27 +141,28 @@ export function open(dbPath: string): Store {
         s.prompt,
         s.summary,
         s.importance,
+        s.agent,
         s.createdAt,
         s.createdAt
       );
     },
-    setSummary(uuid, summary) {
+    setSummary(uuid: string, summary: string) {
       db.prepare('UPDATE sessions SET summary = ? WHERE uuid = ?').run(summary, uuid);
     },
-    setImportance(uuid, importance) {
+    setImportance(uuid: string, importance: Importance) {
       db.prepare('UPDATE sessions SET importance = ? WHERE uuid = ?').run(importance, uuid);
     },
-    deleteSession(uuid) {
+    deleteSession(uuid: string) {
       db.prepare('DELETE FROM sessions WHERE uuid = ?').run(uuid);
     },
-    updateSessionState(uuid, state, ts) {
+    updateSessionState(uuid: string, state: SessionState, ts: number) {
       db.prepare('UPDATE sessions SET state = ?, updated_at = ? WHERE uuid = ?').run(state, ts, uuid);
     },
-    logHookEvent(uuid, event, payload, ts) {
+    logHookEvent(uuid: string, event: string, payload: HookPayload, ts: number) {
       db.prepare('INSERT INTO hook_events (uuid, event, payload, ts) VALUES (?, ?, ?, ?)')
         .run(uuid, event, JSON.stringify(payload), ts);
     },
-    upsertQueue(uuid, cls, reason, ts) {
+    upsertQueue(uuid: string, cls: number, reason: string, ts: number) {
       // One entry per session: refresh class and reason, keep the original
       // enqueue time so waiting sessions never lose their place.
       db.prepare(
@@ -159,21 +170,31 @@ export function open(dbPath: string): Store {
          ON CONFLICT(uuid) DO UPDATE SET class = excluded.class, reason = excluded.reason`
       ).run(uuid, cls, reason, ts);
     },
-    deleteQueue(uuid) {
+    deleteQueue(uuid: string) {
       db.prepare('DELETE FROM queue WHERE uuid = ?').run(uuid);
     },
     readQueue() {
       return db.prepare('SELECT * FROM queue ORDER BY class DESC, enqueued_at ASC').all() as unknown as QueueRow[];
     },
-    recentEvents(limit) {
+    recentEvents(limit: number) {
       return db.prepare('SELECT * FROM hook_events ORDER BY id DESC LIMIT ?').all(limit) as unknown as HookEventRow[];
     },
     listRestorable() {
       // `created_at ASC`: restoration replays creation order, so the focus
       // "première session" lands on the oldest, as it did at first boot.
-      return db
+      const rows = db
         .prepare('SELECT * FROM sessions ORDER BY created_at ASC')
-        .all() as unknown as SessionRow[];
+        .all() as unknown as SessionDbRow[];
+      return rows.map((r): RestorableSession => ({
+        uuid: r.uuid,
+        label: r.label,
+        cwd: r.cwd,
+        agent: r.agent as AgentId,
+        model: r.model,
+        prompt: r.prompt,
+        summary: r.summary,
+        importance: r.importance as Importance
+      }));
     },
     close() {
       db.close();

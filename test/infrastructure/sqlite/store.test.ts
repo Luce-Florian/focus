@@ -3,18 +3,19 @@ import assert from 'node:assert';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { open, type NewSession } from '../../src/main/db.ts';
-import { IMPORTANCE } from '../../src/shared/protocol.ts';
-import { withTempDir } from '../helpers/tmp.ts';
+import { open, type Store } from '../../../src/infrastructure/sqlite/store.ts';
+import type { SessionRowInput } from '../../../src/domain/ports.ts';
+import { IMPORTANCE } from '../../../src/domain/attention.ts';
+import { withTempDir } from '../../helpers/tmp.ts';
 
-function newSession(over: Partial<NewSession> = {}): NewSession {
+function newSession(over: Partial<SessionRowInput> = {}): SessionRowInput {
   return {
     uuid: 'a', label: 'alpha', cwd: '/a', paneId: '%1', windowId: '@1', state: 'booting',
-    model: null, prompt: null, summary: null, importance: IMPORTANCE.NORMAL, createdAt: 1000, ...over
+    model: null, prompt: null, summary: null, importance: IMPORTANCE.NORMAL, agent: 'claude', createdAt: 1000, ...over
   };
 }
 
-function withStore(fn: (store: ReturnType<typeof open>) => void): void {
+function withStore(fn: (store: Store) => void): void {
   withTempDir((dir) => {
     const store = open(path.join(dir, 'fleet.db'));
     try {
@@ -110,15 +111,25 @@ void test('re-registering a restored session refreshes its pane and window but n
   });
 });
 
-void test('a session created from the interface keeps its model, prompt and summary', () => {
+void test('a session created from the interface keeps its model, prompt, summary and agent', () => {
   withStore((store) => {
-    store.insertSession(newSession({ model: 'sonnet', prompt: 'migrate the billing schema' }));
+    store.insertSession(newSession({ model: 'sonnet', prompt: 'migrate the billing schema', agent: 'opencode' }));
     store.setSummary('a', 'Migration du schéma de facturation');
     const row = store.db.prepare('SELECT * FROM sessions WHERE uuid = ?').get('a');
     assert.ok(row);
     assert.equal(row.model, 'sonnet');
     assert.equal(row.prompt, 'migrate the billing schema');
     assert.equal(row.summary, 'Migration du schéma de facturation');
+    assert.equal(row.agent, 'opencode');
+  });
+});
+
+void test('the agent of a restorable session comes back with the row', () => {
+  withStore((store) => {
+    store.insertSession(newSession({ state: 'idle', agent: 'codex' }));
+    const [row] = store.listRestorable();
+    assert.ok(row);
+    assert.equal(row.agent, 'codex', 'the restore pass picks the profile by it');
   });
 });
 
@@ -167,7 +178,7 @@ void test('a discarded session leaves no row behind', () => {
 void test('a database written before the model/prompt/summary columns existed is migrated in place', () => {
   withTempDir((dir) => {
     const dbPath = path.join(dir, 'fleet.db');
-    // The shape `open()` used to create, without the three later columns.
+    // The shape `open()` used to create, without the later columns.
     const legacy = new DatabaseSync(dbPath);
     legacy.exec(`
       CREATE TABLE sessions (
@@ -186,6 +197,7 @@ void test('a database written before the model/prompt/summary columns existed is
       assert.equal(row.model, 'haiku');
       assert.equal(row.summary, null);
       assert.equal(row.importance, IMPORTANCE.NORMAL, 'the importance column defaults to normal');
+      assert.equal(row.agent, 'claude', 'the agent column defaults to claude');
     } finally {
       store.close();
     }

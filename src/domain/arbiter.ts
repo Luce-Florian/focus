@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 
+import type { AgentEvent, HookPayload } from './agent.ts';
 import {
   CLS,
   STATES,
@@ -10,17 +11,10 @@ import {
   IMPORTANCE_LABEL,
   type AttentionClass,
   type Importance,
-  type SessionState,
-  type HookEventMessage,
-  type HookPayload,
-  type SwitchInfo,
-  type FleetSnapshot,
-  type SessionSnapshot
-} from '../shared/protocol.ts';
-import type { ArbiterStore } from './db.ts';
-
-// Proof that the session moved on by itself: its claim on the human is stale.
-const PROGRESS_EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse']);
+  type SessionState
+} from './attention.ts';
+import type { RegisterSession, SessionRecord, SwitchInfo, FleetSnapshot, SessionSnapshot } from './session.ts';
+import type { Clock, Schedule, SessionRepository, Timer } from './ports.ts';
 
 interface ArbiterGuards {
   // Do not yank the view away while the human is mid-keystroke.
@@ -40,58 +34,9 @@ const DEFAULTS: ArbiterGuards = {
   bootTimeoutMs: 15000
 };
 
-export function classifyNotification(payload: HookPayload): { state: SessionState; reason: string } {
-  const message = typeof payload.message === 'string' ? payload.message : '';
-  if (/waiting for your input/i.test(message)) {
-    return { state: STATES.WAITING_INPUT, reason: message || 'en attente de saisie' };
-  }
-  return { state: STATES.WAITING_PERM, reason: message || 'permission demandée' };
-}
-
-export interface RegisterSession {
-  readonly uuid: string;
-  readonly label: string;
-  readonly cwd: string;
-  readonly paneId: string;
-  readonly windowId: string;
-  readonly model?: string | null;
-  readonly prompt?: string | null;
-  // Restore path: the tooltip survives the restart, no need to re-summarise.
-  readonly summary?: string | null;
-  // A resumed session waits for its next instruction: it is not working, no
-  // matter that it was created with an initial prompt.
-  readonly resumed?: boolean;
-  // Human-assigned weight, `NORMAL` unless said otherwise.
-  readonly importance?: Importance;
-}
-
-export interface SessionRecord {
-  uuid: string;
-  label: string;
-  cwd: string;
-  paneId: string;
-  windowId: string;
-  model: string | null;
-  prompt: string | null;
-  summary: string | null;
-  importance: Importance;
-  // Not persisted: only meaningful between `register` and the first pane draw.
-  resumed: boolean;
-  state: SessionState;
-  reason: string;
-  since: number;
-  lastEvent: string | null;
-  updatedAt: number;
-}
-
-interface Timer {
-  unref?(): void;
-}
-type Schedule = (fn: () => void, ms: number) => Timer;
-
 export interface ArbiterOptions {
-  store: ArbiterStore;
-  now?: () => number;
+  store: SessionRepository;
+  now?: Clock;
   schedule?: Schedule;
   options?: Partial<ArbiterGuards>;
 }
@@ -115,14 +60,17 @@ interface ArbiterEvents {
  *     equal claim (ties keep the incumbent);
  *   - recent typing, a recent switch or a manual pick all defer the move
  *     rather than cancel it; the decision is replayed when the guard expires.
+ *
+ * The arbiter reasons only about normalised `AgentEvent`s: how a coding
+ * agent's raw hooks translate into them is an adapter concern.
  */
 export class Arbiter extends EventEmitter<ArbiterEvents> {
   readonly sessions = new Map<string, SessionRecord>();
   focused: string | null = null;
   lastSwitch: SwitchInfo | null = null;
 
-  private readonly store: ArbiterStore;
-  private readonly now: () => number;
+  private readonly store: SessionRepository;
+  private readonly now: Clock;
   private readonly schedule: Schedule;
   private readonly opt: ArbiterGuards;
 
@@ -147,6 +95,7 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
       cwd: session.cwd,
       paneId: session.paneId,
       windowId: session.windowId,
+      agent: session.agent,
       model: session.model ?? null,
       prompt: session.prompt ?? null,
       summary: session.summary ?? null,
@@ -188,7 +137,7 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
 
   /**
    * Human-assigned importance. Persisted, and re-decided at once — same path
-   * as a hook, under the same guards: a sticky manual pick never yields to a
+   * as an event, under the same guards: a sticky manual pick never yields to a
    * mere bump.
    */
   setImportance(uuid: string, importance: Importance): void {
@@ -211,11 +160,9 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
   }
 
   /**
-   * First bytes drawn by the pane. `SessionStart` is not observed to fire
-   * (Claude Code 2.1.236, HTTP hooks), so the pane rendering at all is the
-   * only proof the process came up. A session launched with a prompt is
-   * already working; one launched without waits for its first instruction —
-   * and so does a resumed one, whatever its original prompt was.
+   * First bytes drawn by the pane: the process is up. A session launched with
+   * a prompt is already working; one launched without waits for its first
+   * instruction — and so does a resumed one, whatever its original prompt was.
    */
   noteAlive(uuid: string): void {
     const s = this.sessions.get(uuid);
@@ -228,7 +175,7 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
   }
 
   /**
-   * The pane printed the end-of-session marker: Claude Code exited. Before it
+   * The pane printed the end-of-session marker: the agent exited. Before it
    * ever drew anything, that is a launch that did not take.
    */
   noteEnded(uuid: string): void {
@@ -279,35 +226,49 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
     return s ? STATE_CLASS[s.state] : CLS.GONE;
   }
 
-  handleHook({ uuid, event, payload }: HookEventMessage): void {
+  /**
+   * A raw agent hook, already translated into a normalised event (`null` when
+   * the adapter did not recognise it). Everything is logged, unknown sessions
+   * are reported as orphans, and only a recognised event moves the state.
+   */
+  handleHook(uuid: string, ev: AgentEvent | null, rawEvent: string, payload: HookPayload = {}): void {
     const ts = this.now();
-    this.store.logHookEvent(uuid, event, payload, ts);
+    this.store.logHookEvent(uuid, rawEvent, payload, ts);
 
     const s = this.sessions.get(uuid);
     if (!s) {
-      this.emit('orphan', { uuid, event });
+      this.emit('orphan', { uuid, event: rawEvent });
       return;
     }
 
-    s.lastEvent = event;
+    s.lastEvent = rawEvent;
     s.updatedAt = ts;
 
-    if (PROGRESS_EVENTS.has(event)) {
-      this._setState(s, STATES.RUNNING, 'travaille', ts);
-    } else if (event === 'Notification') {
-      const { state, reason } = classifyNotification(payload);
-      this._setState(s, state, reason, ts);
-    } else if (event === 'Stop') {
-      this._setState(s, STATES.IDLE, 'tour terminé', ts);
-    } else if (event === 'SessionEnd') {
-      this._setState(s, STATES.GONE, 'session terminée', ts);
+    if (ev) {
+      switch (ev.kind) {
+        case 'progress':
+          this._setState(s, STATES.RUNNING, ev.reason, ts);
+          break;
+        case 'waiting-input':
+          this._setState(s, STATES.WAITING_INPUT, ev.reason, ts);
+          break;
+        case 'waiting-perm':
+          this._setState(s, STATES.WAITING_PERM, ev.reason, ts);
+          break;
+        case 'stop':
+          this._setState(s, STATES.IDLE, ev.reason, ts);
+          break;
+        case 'ended':
+          this._setState(s, STATES.GONE, ev.reason, ts);
+          break;
+      }
     }
 
     this.evaluate();
     this.emit('change');
   }
 
-  /** Pane or window died without a SessionEnd hook. */
+  /** Pane or window died without an end event. */
   markGone(uuid: string): void {
     const s = this.sessions.get(uuid);
     if (!s) return;
@@ -467,6 +428,7 @@ export class Arbiter extends EventEmitter<ArbiterEvents> {
       label: s.label,
       cwd: s.cwd,
       paneId: s.paneId,
+      agent: s.agent,
       model: s.model,
       prompt: s.prompt,
       summary: s.summary,

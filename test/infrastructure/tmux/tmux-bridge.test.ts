@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 
-import { decodeOutput, toHexKeys } from '../../src/main/tmux.ts';
+import { decodeOutput, toHexKeys } from '../../../src/infrastructure/tmux/tmux-bridge.ts';
 
 void test('plain ASCII passes through untouched', () => {
   assert.deepEqual(decodeOutput('hello'), Buffer.from('hello', 'latin1'));
